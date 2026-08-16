@@ -5,6 +5,7 @@ import subprocess
 import threading
 import urllib.parse
 import webbrowser
+from pathlib import Path
 
 import psutil
 from pynput.keyboard import Controller, Key
@@ -14,15 +15,36 @@ from assistant import tts
 _exit_event = threading.Event()
 
 
+def _find_app(name):
+    base_dirs = [
+        Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+    ]
+    name_l = name.lower()
+    for base in base_dirs:
+        if not base.is_dir():
+            continue
+        for lnk in base.rglob("*.lnk"):
+            if name_l in lnk.stem.lower():
+                return str(lnk)
+    where = subprocess.run(
+        ["where.exe", name], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
+    )
+    if where.returncode == 0:
+        return where.stdout.strip().splitlines()[0]
+    return None
+
+
 def open_app(name):
-    try:
-        if os.path.isfile(name):
-            os.startfile(name)
-        else:
-            subprocess.Popen(["cmd", "/c", "start", "", name], shell=False)
-    except Exception:
-        return f"Не получилось запустить {name}"
-    return f"Запускаю {name}"
+    name = name.strip().strip('"')
+    if os.path.isfile(name):
+        os.startfile(name)
+        return f"Запускаю {name}"
+    target = _find_app(name)
+    if target:
+        os.startfile(target)
+        return f"Запускаю {name}"
+    return f"Не нашёл приложение {name}. Скажите название как в меню Пуск"
 
 
 def open_url(query):

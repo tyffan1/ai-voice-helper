@@ -3,3 +3,7 @@ models/
 __pycache__/
 *.pyc
 *.wav
+build/
+dist/
+*.spec
+deri.log

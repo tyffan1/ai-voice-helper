@@ -1,8 +1,25 @@
 import os
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODELS_DIR = BASE_DIR / "models"
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+_LLM_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
+
+
+def _resolve_models_dir():
+    if not getattr(sys, "frozen", False):
+        return BASE_DIR / "models"
+    for candidate in (BASE_DIR / "models", Path.cwd() / "models", BASE_DIR.parent / "models"):
+        if (candidate / _LLM_FILE).exists():
+            return candidate
+    return BASE_DIR / "models"
+
+
+MODELS_DIR = _resolve_models_dir()
 MODELS_DIR.mkdir(exist_ok=True)
 
 WHISPER_MODEL = os.environ.get("ASSISTANT_WHISPER", "small")
@@ -14,6 +31,9 @@ PIPER_VOICE = os.environ.get(
 )
 
 HOTKEY = os.environ.get("ASSISTANT_HOTKEY", "<ctrl>+<shift>+<space>")
+CITY = os.environ.get("ASSISTANT_CITY", "Москва")
+WAKE_NAME = os.environ.get("ASSISTANT_WAKE_NAME", "атом")
+WAKE_VOLUME_THRESHOLD = 500
 SAMPLE_RATE = 16000
 SILENCE_MS = 1200
 VOLUME_THRESHOLD = 300

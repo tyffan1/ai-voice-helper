@@ -1,62 +1,60 @@
+﻿import threading
+
 from pynput import keyboard
 
-from assistant import audio, actions, llm, stt, tts
-from assistant.config import HOTKEY
+from assistant import llm, stt, tts
+from assistant.config import BASE_DIR, HOTKEY, MODELS_DIR
+from assistant.controller import Controller
+from assistant.gui import App
+from assistant.wake import WakeListener
+
+LOG_PATH = BASE_DIR / "deri.log"
 
 
-def handle(text):
-    if not text or len(text) < 3:
-        tts.speak("Не расслышал, повторите")
-        return
-    print(f"  распознано: {text}")
-    decision = llm.ask(text)
-    if "reply" in decision:
-        print(f"  ответ: {decision['reply']}")
-        tts.speak(decision["reply"])
-        return
-    tool = decision.get("tool")
-    params = decision.get("params") or {}
-    if not tool:
-        print(f"  не JSON: {decision}")
-        tts.speak(decision.get("reply") or "Не понял запрос")
-        return
-    print(f"  действие: {tool} {params}")
-    result = actions.execute(tool, params)
-    if result:
-        tts.speak(result)
-
-
-def on_trigger():
-    audio.beep(880.0, 0.12)
-    print("\nСлушаю...")
+def log(msg):
     try:
-        recording = audio.record_until_silence()
-        rms = float((recording.astype(float) ** 2).mean() ** 0.5)
-        if rms < 8.0:
-            print("  (тихо — не распознаю)")
-            tts.speak("Не расслышал, повторите")
-            return
-        wav = audio.temp_wav(recording)
-        text = stt.transcribe(wav)
-        audio.beep(440.0, 0.08)
-        handle(text)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
+
+def warmup():
+    try:
+        stt.load()
+        llm.load()
+        tts.load()
+        log("Модели загружены")
+        print("Модели загружены")
     except Exception as exc:
-        print(f"  ошибка: {exc}")
-        try:
-            tts.speak("Произошла ошибка, попробуйте ещё раз")
-        except Exception:
-            pass
+        log(f"Ошибка предзагрузки моделей: {exc}")
+        print(f"Ошибка предзагрузки моделей: {exc}")
 
 
 def main():
-    print(f"Ассистент запущен. Нажмите {HOTKEY} для команды. Для выхода скажите: выключи ассистента.")
-    listener = keyboard.GlobalHotKeys({HOTKEY: on_trigger})
+    log(f"Запуск ассистента Атом. Модели: {MODELS_DIR}")
+    print("Запуск ассистента Атом...")
+    controller = Controller()
+    app = App(controller)
+    controller.emit_status = app.emit_status
+    controller.emit_log = app.emit_log
+    controller.on_exit = lambda: app.after(0, app._on_close)
+
+    threading.Thread(target=warmup, daemon=True).start()
+
+    wake = WakeListener(controller)
+    wake.start()
+    log("Wake-листенер запущен")
+
+    listener = keyboard.GlobalHotKeys({HOTKEY: controller.record_and_handle})
     listener.start()
+
     try:
-        while not actions.wait_exit(1.0):
-            pass
+        app.mainloop()
     finally:
+        wake.stop()
         listener.stop()
+        log("Ассистент остановлен")
         print("Ассистент остановлен")
 
 
