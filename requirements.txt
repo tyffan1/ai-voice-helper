@@ -1,0 +1,7 @@
+faster-whisper
+piper-tts
+llama-cpp-python
+sounddevice
+numpy
+pynput
+psutil
