@@ -8,3 +8,7 @@ psutil
 customtkinter
 pystray
 pillow
+comtypes
+pycaw
+edge-tts
+miniaudio

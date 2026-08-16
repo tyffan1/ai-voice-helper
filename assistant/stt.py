@@ -18,14 +18,22 @@ def load():
     return _model
 
 
-def transcribe(wav_path, lang=None):
+def transcribe(wav_path, lang=None, wake=False):
     lang = lang or i18n.stt_language()
     model = load()
-    segments, _info = model.transcribe(
-        str(wav_path),
+    kwargs = dict(
         language=lang,
         beam_size=1,
         vad_filter=True,
         condition_on_previous_text=False,
     )
+    if wake:
+        name = i18n.wake_name()
+        kwargs["initial_prompt"] = f"{name}, {name}, {name}."
+        kwargs["vad_parameters"] = {
+            "min_speech_duration_ms": 100,
+            "speech_pad_ms": 200,
+        }
+        kwargs["no_speech_threshold"] = None
+    segments, _info = model.transcribe(str(wav_path), **kwargs)
     return " ".join(s.text.strip() for s in segments).strip()

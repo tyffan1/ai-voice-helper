@@ -1,4 +1,4 @@
-import inspect
+﻿import inspect
 import json
 import os
 import threading
@@ -16,29 +16,26 @@ _tools_cache = {}
 _SYSTEM = {
     "ru": (
         "Ты — голосовой ассистент на русском языке, работающий на компьютере пользователя. "
-        "Ты умеешь выполнять действия на компьютере через инструменты: запускать приложения, "
-        "открывать сайты и поиск в браузере, печатать текст, нажимать клавиши, закрывать вкладки, "
-        "делать скриншоты, ставить таймеры, сообщать время и состояние системы. "
         "Выбирай инструмент, если он нужен; иначе отвечай кратко и дружелюбно. "
+        "Говори живо и по-человечески: короткие фразы, разнообразь формулировки, "
+        "не будь канцелярским, допустима лёгкая ирония, но без сарказма в адрес пользователя. "
         "Про время, дату и систему всегда используй инструменты, не отвечай по памяти. "
         "Погоду всегда получай инструментом get_weather и озвучивай её, никогда не открывай сайты с погодой. "
         "Если пользователь назвал город — передай его в get_weather. "
-        "Печать в поле ввода — type_text, нажатие клавиш и комбинаций — press_key, "
-        "закрытие вкладки — close_tab, прокрутка — scroll. "
         "Выключение компьютера — только по явной просьбе пользователя. "
+        "«Запусти/открой/включи + название» — всегда вызывай open_app или open_game, не отвечай просто текстом. "
         'Пример: на «Какая погода в Киеве?» ответь {"tool": "get_weather", "arguments": {"city": "Киев"}}.'
     ),
     "en": (
         "You are a voice assistant answering in English, running on the user's computer. "
-        "You can perform actions via tools: launch apps, open sites and search, type text, "
-        "press keys, close tabs, take screenshots, set timers, report time and system state. "
         "Pick a tool when needed; otherwise reply briefly and friendly. "
+        "Sound lively and human: short phrases, vary your wording, never sound robotic; "
+        "light humor is fine, but no sarcasm toward the user. "
         "Always use tools for time, date and system state, never answer from memory. "
         "Always fetch weather with the get_weather tool and speak it, never open weather sites. "
         "If the user named a city, pass it to get_weather. "
-        "Typing into an input field - type_text, keys and shortcuts - press_key, "
-        "closing a tab - close_tab, scrolling - scroll. "
         "Shutdown only on explicit user request. "
+        "For 'open/launch/start <name>' always use the open_app or open_game tool, never reply with plain text. "
         'Example: for "What is the weather in Kyiv?" answer {"tool": "get_weather", "arguments": {"city": "Kyiv"}}.'
     ),
 }
@@ -46,6 +43,14 @@ _SYSTEM = {
 _DESC = {
     "open_app": ("запустить приложение или программу по имени или пути, params: name",
                  "launch an app or program by name or path, params: name"),
+    "open_game": ("запустить игру (Steam, Game Pass или ярлык), params: name",
+                  "launch a game (Steam, Game Pass or a shortcut), params: name"),
+    "system_setting": ("изменить настройку системы: громкость, яркость, вайфай, блютуз, тема, разрешение экрана, экран, сон, перезагрузка, params: setting и value",
+                       "change a system setting: volume, brightness, wifi, bluetooth, theme, screen resolution, display, sleep, restart, params: setting and value"),
+    "web_search": ("найти информацию в интернете и вернуть ссылки, params: query",
+                   "search the internet and return links, params: query"),
+    "web_query": ("найти информацию в интернете, открыть лучший результат и вернуть его текст, params: query",
+                  "search the internet, open the best result and return its text, params: query"),
     "open_url": ("открыть сайт или поисковый запрос в браузере, params: query",
                  "open a website or a search query in the browser, params: query"),
     "type_text": ("напечатать текст в активном текстовом поле с клавиатуры, params: text",
@@ -54,6 +59,8 @@ _DESC = {
                   "press a key or a key combination, e.g.: enter, esc, tab, ctrl+s, win+d, ctrl+w, params: keys"),
     "close_tab": ("закрыть активную вкладку в браузере, params: нет",
                   "close the active browser tab, params: none"),
+    "close_app": ("закрыть запущенное приложение или программу по имени, params: name",
+                  "close a running application by name, params: name"),
     "new_tab": ("открыть новую вкладку в браузере, params: нет",
                 "open a new browser tab, params: none"),
     "refresh_page": ("обновить страницу в браузере, params: нет",
@@ -66,6 +73,8 @@ _DESC = {
                    "take a screenshot of the screen and save it, params: none"),
     "get_weather": ("узнать текущую погоду в городе и озвучить её, params: city (если город не назван — город пользователя)",
                     "get the current weather in a city and speak it, params: city (if no city given - the user's city)"),
+    "get_currency": ("узнать курс валют, params: base (код или название валюты), quote (валюта, к которой курс) или value (например 'доллар к гривне')",
+                     "get a currency exchange rate, params: base (currency code or name), quote (currency to compare) or value (e.g. 'dollar to hryvnia')"),
     "set_timer": ("поставить таймер, params: minutes (число) и message (что напомнить)",
                   "set a timer, params: minutes (number) and message (what to remind)"),
     "get_time": ("сообщить текущее время и дату, params: нет",
@@ -85,9 +94,11 @@ _DESC = {
 }
 
 
-def _build_tools(lang):
+def _build_tools(lang, wanted=None):
     tools = []
     for name, (fn, _desc) in REGISTRY.items():
+        if wanted is not None and name not in wanted:
+            continue
         desc = _DESC.get(name, (_desc, _desc))[0 if lang == "ru" else 1]
         sig = inspect.signature(fn)
         props = {}
@@ -121,10 +132,43 @@ def _build_tools(lang):
     return tools
 
 
-def _tools(lang):
-    if lang not in _tools_cache:
-        _tools_cache[lang] = _build_tools(lang)
-    return _tools_cache[lang]
+_DEFAULT_TOOLS = frozenset(
+    {"open_app", "open_game", "open_url", "type_text", "press_key", "get_time",
+     "exit_assistant", "web_query", "web_search", "close_app"}
+)
+
+_KEYWORDS = {
+    "get_weather": ["погод", "град", "дожд", "температур", "солнц", "ветер", "снег", "weather", "rain", "snow", "temperature"],
+    "get_currency": ["курс", "доллар", "евро", "гривн", "рубл", "юан", "валюта", "биткоин", "bitcoin", "currency", "exchange", "rate"],
+    "set_timer": ["таймер", "напомн", "timer", "remind", "через"],
+    "screenshot": ["скриншот", "скрин", "экран", "снимок", "screenshot", "capture"],
+    "system_info": ["процессор", "память", "батаре", "систем", "нагрузк", "cpu", "battery", "memory", "system", "заряд"],
+    "shutdown": ["выключ", "выруб", "shutdown", "turn off"],
+    "cancel_shutdown": ["отмен", "cancel", "не надо"],
+    "lock_screen": ["блокировк", "заблокир", "lock"],
+    "close_tab": ["вкладк", "закрой", "close", "tab"],
+    "close_app": ["закрой", "закрыть", "закройте", "закрывай", "заверши", "выключи", "закройка", "приложени", "программ", "close", "quit", "exit"],
+    "new_tab": ["новую вкладк", "new tab"],
+    "refresh_page": ["обнов", "refresh", "reload"],
+    "show_desktop": ["рабочий стол", "сверни", "desktop", "minimize"],
+    "scroll": ["прокрут", "листа", "вниз", "вверх", "scroll"],
+    "open_folder": ["папк", "проводник", "folder", "explorer"],
+    "open_game": ["игр", "game", "steam", "поиграть", "гейм", "запусти", "запуск", "запускать", "стартуй", "launch", "start"],
+    "system_setting": ["громк", "volume", "звук", "громче", "тише", "яркост", "brightness", "вайфай", "wi-fi", "wifi", "блютуз", "bluetooth", "тема", "тёмн", "темн", "светл", "theme", "экран", "монитор", "дисплей", "сон", "спать", "sleep", "перезагруз", "restart", "настройк", "settings", "разрешени", "resolution"],
+    "web_query": ["найди", "поищи", "поиск", "узнай", "в интернете", "google", "гугл", "search", "что такое", "как сделать", "как приготовить", "рецепт", "новости", "переведи", "интернет", "web"],
+}
+
+
+def _tools(lang, user_text=""):
+    wanted = set(_DEFAULT_TOOLS)
+    text = (user_text or "").lower()
+    for tool, kws in _KEYWORDS.items():
+        if any(kw in text for kw in kws):
+            wanted.add(tool)
+    key = (lang, frozenset(wanted))
+    if key not in _tools_cache:
+        _tools_cache[key] = _build_tools(lang, wanted)
+    return _tools_cache[key]
 
 
 def load():
@@ -137,7 +181,8 @@ def load():
                     model_path=LLM_MODEL_PATH,
                     n_ctx=2048,
                     n_threads=n_threads,
-                    n_batch=256,
+                    n_batch=512,
+                    flash_attn=True,
                     verbose=False,
                 )
     return _model
@@ -168,6 +213,47 @@ def _extract_tool_call(content):
     return None
 
 
+def summarize(text, query, lang=None):
+    lang = lang or i18n.get_language()
+    if lang == "en":
+        system = (
+            "You are a voice assistant. Give a short, lively answer to the user's question "
+            "based on the web text below: 1-3 sentences, meant to be read aloud. "
+            "No headings or preamble — answer directly. "
+            "If the text has the exact answer — give it with numbers and facts. "
+            "If the request is about a recipe — list the main ingredients and briefly the cooking steps. "
+            "If the text has no answer or is just a catalog/link list — "
+            "honestly say the information is insufficient."
+        )
+        tmpl = "Question: {q}\n\nWeb text:\n{t}"
+    else:
+        system = (
+            "Ты — голосовой ассистент. Дай короткий живой ответ на запрос пользователя "
+            "на основе текста из интернета ниже: 1-3 предложения, для чтения вслух. "
+            "Никаких заголовков и предисловий — сразу ответ. "
+            "Если в тексте есть точный ответ — приведи его цифрами и фактами. "
+            "Если запрос о рецепте — перечисли основные ингредиенты и кратко шаги приготовления. "
+            "Если в тексте нет ответа или это только каталог/список ссылок — "
+            "честно скажи, что информации недостаточно."
+        )
+        tmpl = "Запрос: {q}\n\nТекст из интернета:\n{t}"
+    chunk = text[:2000]
+    for _ in range(4):
+        try:
+            out = load().create_chat_completion(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": tmpl.format(q=query, t=chunk)},
+                ],
+                temperature=0.3,
+                max_tokens=160,
+            )
+            return (out["choices"][0]["message"].get("content") or "").strip() or text[:300]
+        except ValueError:
+            chunk = chunk[: len(chunk) // 2]
+    return text[:300]
+
+
 def ask(user_text, lang=None):
     lang = lang or i18n.get_language()
     out = load().create_chat_completion(
@@ -177,7 +263,7 @@ def ask(user_text, lang=None):
         ],
         temperature=0.1,
         max_tokens=128,
-        tools=_tools(lang),
+        tools=_tools(lang, user_text),
     )
     msg = out["choices"][0]["message"]
     if msg.get("tool_calls"):
