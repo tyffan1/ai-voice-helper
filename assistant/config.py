@@ -26,9 +26,10 @@ WHISPER_MODEL = os.environ.get("ASSISTANT_WHISPER", "small")
 LLM_MODEL_PATH = os.environ.get(
     "ASSISTANT_LLM", str(MODELS_DIR / "qwen2.5-3b-instruct-q4_k_m.gguf")
 )
-PIPER_VOICE = os.environ.get(
-    "ASSISTANT_PIPER", str(MODELS_DIR / "ru_RU-irina-medium.onnx")
-)
+PIPER_VOICES = {
+    "ru": os.environ.get("ASSISTANT_PIPER_RU", str(MODELS_DIR / "ru_RU-irina-medium.onnx")),
+    "en": os.environ.get("ASSISTANT_PIPER_EN", str(MODELS_DIR / "en_US-lessac-medium.onnx")),
+}
 
 HOTKEY = os.environ.get("ASSISTANT_HOTKEY", "<ctrl>+<shift>+<space>")
 CITY = os.environ.get("ASSISTANT_CITY", "Москва")

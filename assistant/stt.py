@@ -2,6 +2,7 @@ import threading
 
 from faster_whisper import WhisperModel
 
+from assistant import i18n
 from assistant.config import WHISPER_MODEL
 
 _model = None
@@ -17,11 +18,12 @@ def load():
     return _model
 
 
-def transcribe(wav_path):
+def transcribe(wav_path, lang=None):
+    lang = lang or i18n.stt_language()
     model = load()
     segments, _info = model.transcribe(
         str(wav_path),
-        language="ru",
+        language=lang,
         beam_size=1,
         vad_filter=True,
         condition_on_previous_text=False,

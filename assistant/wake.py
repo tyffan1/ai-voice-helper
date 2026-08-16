@@ -38,7 +38,7 @@ class WakeListener(threading.Thread):
         return np.concatenate(blocks).reshape(-1)
 
     def run(self):
-        print("Wake-листенер запущен")
+        print("Wake listener started")
         try:
             with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as stream:
                 while not self._stop.is_set():
@@ -50,11 +50,11 @@ class WakeListener(threading.Thread):
                         and time.time() - self.controller._wake_seen_at > 8
                     ):
                         self.controller.wake_awaiting = False
-                        print("[wake] таймаут ожидания команды")
+                        print("[wake] command wait timeout")
                         continue
                     clip = self._speech_blocks(stream)
                     if clip is None or len(clip) < int(SAMPLE_RATE * 0.5):
                         continue
                     self.controller.wake_session(clip)
         except Exception as exc:
-            print(f"Wake-листенер остановлен: {exc}")
+            print(f"Wake listener stopped: {exc}")

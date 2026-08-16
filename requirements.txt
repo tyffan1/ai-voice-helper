@@ -6,3 +6,5 @@ numpy
 pynput
 psutil
 customtkinter
+pystray
+pillow

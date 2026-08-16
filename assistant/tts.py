@@ -1,3 +1,4 @@
+import os
 import threading
 import wave
 
@@ -5,9 +6,10 @@ import numpy as np
 import sounddevice as sd
 from piper import PiperVoice
 
-from assistant.config import PIPER_VOICE
+from assistant import i18n
+from assistant.config import PIPER_VOICES
 
-_voice = None
+_voices = {}
 _lock = threading.Lock()
 _speaking = False
 
@@ -16,21 +18,23 @@ def is_speaking():
     return _speaking
 
 
-def load():
-    global _voice
-    if _voice is None:
-        with _lock:
-            if _voice is None:
-                _voice = PiperVoice.load(PIPER_VOICE)
-    return _voice
+def load(lang=None):
+    lang = lang or i18n.get_language()
+    with _lock:
+        if lang not in _voices:
+            path = PIPER_VOICES[lang]
+            if not os.path.exists(path):
+                path = PIPER_VOICES["ru"]
+            _voices[lang] = PiperVoice.load(path)
+    return _voices[lang]
 
 
-def synth_to_wav(text, path):
+def synth_to_wav(text, path, lang=None):
     with wave.open(str(path), "wb") as wf:
-        load().synthesize_wav(text, wf)
+        load(lang).synthesize_wav(text, wf)
 
 
-def speak(text):
+def speak(text, lang=None):
     import tempfile
 
     global _speaking
@@ -38,7 +42,7 @@ def speak(text):
     try:
         f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         f.close()
-        synth_to_wav(text, f.name)
+        synth_to_wav(text, f.name, lang)
         wf = wave.open(f.name, "rb")
         data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
         audio = (data.astype(np.float32) / 32768.0).reshape(-1)
