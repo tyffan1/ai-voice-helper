@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -18,7 +19,7 @@ from pynput import mouse
 from pynput.keyboard import Controller, Key
 
 from assistant import i18n, tts
-from assistant.config import CITY
+from assistant.config import BASE_DIR, CITY
 from assistant.i18n import L
 
 _exit_event = threading.Event()
@@ -680,6 +681,43 @@ def _search(query):
         return _bing_search(query)
     except Exception:
         return []
+
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_NAME = "AtomAssistant"
+
+
+def _autostart_command():
+    if getattr(sys, "frozen", False):
+        return f'"{os.path.abspath(sys.executable)}"'
+    return f'"{os.path.abspath(sys.executable)}" "{BASE_DIR / "run_app.py"}"'
+
+
+def is_autostart():
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.QueryValueEx(k, _AUTOSTART_NAME)
+            return True
+    except OSError:
+        return False
+
+
+def set_autostart(enabled):
+    import winreg
+
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE)
+    try:
+        if enabled:
+            winreg.SetValueEx(key, _AUTOSTART_NAME, 0, winreg.REG_SZ, _autostart_command())
+        else:
+            try:
+                winreg.DeleteValue(key, _AUTOSTART_NAME)
+            except FileNotFoundError:
+                pass
+    finally:
+        winreg.CloseKey(key)
 
 
 def _my_ip():
