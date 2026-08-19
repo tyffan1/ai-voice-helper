@@ -23,7 +23,7 @@ def _resolve_models_dir():
 MODELS_DIR = _resolve_models_dir()
 MODELS_DIR.mkdir(exist_ok=True)
 
-WHISPER_MODEL = os.environ.get("ASSISTANT_WHISPER", "small")
+WHISPER_MODEL = os.environ.get("ASSISTANT_WHISPER", "base")  # tiny | base | small | medium
 LLM_MODEL_PATH = os.environ.get(
     "ASSISTANT_LLM", str(MODELS_DIR / "qwen2.5-1.5b-instruct-q4_k_m.gguf")
 )

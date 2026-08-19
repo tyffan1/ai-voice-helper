@@ -5,7 +5,7 @@ import threading
 
 from llama_cpp import Llama
 
-from assistant import i18n
+from assistant import i18n, memory
 from assistant.actions import REGISTRY
 from assistant.config import LLM_MODEL_PATH
 
@@ -91,6 +91,10 @@ _DESC = {
                         "cancel the computer shutdown, params: none"),
     "exit_assistant": ("завершить работу ассистента, params: нет",
                        "quit the assistant, params: none"),
+    "remember": ("запомнить факт о пользователе на будущее, params: fact (что запомнить)",
+                 "remember a fact about the user for later, params: fact (what to remember)"),
+    "forget": ("забыть ранее запомненный факт по ключевому слову, params: keyword",
+               "forget a previously remembered fact by keyword, params: keyword"),
 }
 
 
@@ -156,6 +160,8 @@ _KEYWORDS = {
     "open_game": ["игр", "game", "steam", "поиграть", "гейм", "запусти", "запуск", "запускать", "стартуй", "launch", "start"],
     "system_setting": ["громк", "volume", "звук", "громче", "тише", "яркост", "brightness", "вайфай", "wi-fi", "wifi", "блютуз", "bluetooth", "тема", "тёмн", "темн", "светл", "theme", "экран", "монитор", "дисплей", "сон", "спать", "sleep", "перезагруз", "restart", "настройк", "settings", "разрешени", "resolution"],
     "web_query": ["найди", "поищи", "поиск", "узнай", "в интернете", "google", "гугл", "search", "что такое", "как сделать", "как приготовить", "рецепт", "новости", "переведи", "интернет", "web"],
+    "remember": ["запомн", "сохран", "запиш", "не забудь", "памят", "remember", "save", "note", "запомнишь"],
+    "forget": ["забудь", "забыт", "забывай", "forget", "забыла"],
 }
 
 
@@ -256,9 +262,13 @@ def summarize(text, query, lang=None):
 
 def ask(user_text, lang=None):
     lang = lang or i18n.get_language()
+    system = _SYSTEM[lang]
+    extra = memory.profile_text(lang)
+    if extra:
+        system = system + "\n" + extra
     out = load().create_chat_completion(
         messages=[
-            {"role": "system", "content": _SYSTEM[lang]},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_text},
         ],
         temperature=0.1,

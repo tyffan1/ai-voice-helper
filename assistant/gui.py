@@ -1,5 +1,7 @@
 ﻿import queue
+import sys
 import threading
+from pathlib import Path
 
 import customtkinter as ctk
 import pystray
@@ -16,7 +18,19 @@ BLUE = "#2196f3"
 RED = "#f44336"
 
 
+def _icon_path():
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "assets" / "icon.ico"
+    return Path(__file__).resolve().parent.parent / "assets" / "icon.ico"
+
+
 def _make_tray_image():
+    try:
+        img = Image.open(_icon_path()).convert("RGBA").resize((64, 64), Image.LANCZOS)
+        if img.getbbox():
+            return img
+    except Exception:
+        pass
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse((22, 22, 42, 42), fill=(76, 175, 80))
@@ -33,6 +47,10 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         self.title(L("Атом — голосовой ассистент", "Atom - voice assistant"))
+        try:
+            self.iconbitmap(default=str(_icon_path()))
+        except Exception:
+            pass
         self.geometry("460x640")
         self.minsize(400, 560)
         self.controller = controller

@@ -1,8 +1,9 @@
 import json
+import os
+from pathlib import Path
 
-from assistant.config import BASE_DIR
-
-SETTINGS_PATH = BASE_DIR / "settings.json"
+_DATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "AtomAssistant"
+SETTINGS_PATH = _DATA_DIR / "settings.json"
 
 _lang = "ru"
 
@@ -23,6 +24,7 @@ def load_settings():
 
 def save_settings():
     try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             json.dump({"language": _lang}, f, ensure_ascii=False)
     except Exception:

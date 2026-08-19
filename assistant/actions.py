@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -18,7 +19,7 @@ import psutil
 from pynput import mouse
 from pynput.keyboard import Controller, Key
 
-from assistant import i18n, tts
+from assistant import i18n, memory, tts
 from assistant.config import BASE_DIR, CITY
 from assistant.i18n import L
 
@@ -63,16 +64,51 @@ def _rank(stem, name_l):
     return 1
 
 
-def _search_lnk(name):
+_APP_ALIASES = {
+    "фокс": "firefox", "фоера": "firefox", "фаерфокс": "firefox", "файерфокс": "firefox", "огнелис": "firefox",
+    "мозила": "firefox", "мозилла": "firefox", "fox": "firefox",
+    "телжку": "telegram", "тенге": "telegram", "тележка": "telegram", "телега": "telegram",
+    "телеграмм": "telegram", "телеграм": "telegram", "тг": "telegram",
+    "хром": "chrome", "гуглхром": "chrome", "гугл хром": "chrome", "chrome": "chrome",
+    "эдж": "edge", "едж": "edge",
+    "стим": "steam", "стиме": "steam", "steam": "steam",
+    "дискорд": "discord", "дис корд": "discord", "discord": "discord",
+    "ватсап": "whatsapp", "воцап": "whatsapp", "вотсап": "whatsapp", "вацап": "whatsapp",
+    "зум": "zoom", "зуме": "zoom", "zoom": "zoom",
+    "скайп": "skype", "скаип": "skype",
+    "спотифай": "spotify", "спотифае": "spotify", "спотифая": "spotify", "спотифей": "spotify",
+    "пейнт": "mspaint", "паинт": "mspaint", "пэйнт": "mspaint",
+    "ворд": "winword", "ворде": "winword", "вёрд": "winword",
+    "эксель": "excel", "экзель": "excel", "иксель": "excel",
+    "блокнот": "notepad", "ноутпад": "notepad",
+    "калькулятор": "calculator", "кальку": "calculator",
+    "проводник": "explorer", "эксплорер": "explorer", "файловый менеджер": "explorer",
+    "броузер": "browser", "браузер": "browser",
+    "вк": "vk", "вконтакте": "vk", "в контакте": "vk",
+    "ютуб": "youtube", "ютубе": "youtube", "ютьюб": "youtube",
+    "гугл хром": "chrome", "вижуал студио": "code", "визуал студио": "code", "вижуал студио код": "code",
+    "фотошоп": "photoshop", "фотошопе": "photoshop",
+}
+
+
+def _resolve_name(name):
+    n = (name or "").strip().strip('"').lower()
+    if n in _APP_ALIASES:
+        return _APP_ALIASES[n]
+    words = n.split()
+    return " ".join(_APP_ALIASES.get(w, w) for w in words) or n
+
+
+def _search_lnk(name, allow_url=False):
     name_l = name.lower()
     best = None
     for base in _iter_lnk_dirs():
         for lnk in base.rglob("*.lnk"):
             stem = lnk.stem.lower()
-            if name_l not in stem:
+            if name_l not in stem and name_l not in _to_ru(stem):
                 continue
             target = _lnk_target(lnk).lower()
-            if target.startswith(("http://", "https://", "steam:", "minecraft:")):
+            if not allow_url and target.startswith(("http://", "https://", "steam:", "minecraft:")):
                 continue
             if best is None or _rank(stem, name_l) > _rank(best[1], name_l):
                 best = (str(lnk), stem)
@@ -114,10 +150,12 @@ def _uwp_apps():
 def _search_uwp(name):
     name_l = name.lower()
     name_t = _translit(name)
+    name_r = _to_ru(name)
     best = None
     for n, appid in _uwp_apps():
         nl = n.lower()
-        if name_l in nl or (name_t and name_t in nl):
+        nr = _to_ru(nl)
+        if name_l in nl or name_l in nr or (name_t and name_t in nl) or (name_r and name_r in nr):
             if best is None or _rank(nl, name_l) > _rank(best[1], name_l):
                 best = (appid, nl)
     return best
@@ -130,6 +168,22 @@ _TRANSLIT = {
     "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
     "ы": "y", "ь": "", "ъ": "", "э": "e", "ю": "yu", "я": "ya",
 }
+
+_TRANSLIT_EN = {
+    "zh": "ж", "kh": "х", "ts": "ц", "ch": "ч", "sh": "ш", "sch": "щ",
+    "yu": "ю", "ya": "я", "yo": "ё", "ye": "е",
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
+    "h": "х", "i": "и", "j": "дж", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
+    "v": "в", "w": "в", "x": "кс", "y": "и", "z": "з",
+}
+
+
+def _to_ru(text):
+    s = (text or "").lower()
+    for k, v in _TRANSLIT_EN.items():
+        s = s.replace(k, v)
+    return s
 
 
 def _translit(text):
@@ -162,6 +216,7 @@ def _fuzzy_hit(query, candidate):
 
 def _search_steam(name):
     name_l = _translit(name)
+    name_r = name.lower()
     try:
         vdf = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Steam" / "steamapps" / "libraryfolders.vdf"
         libs = [vdf.parent]
@@ -182,7 +237,7 @@ def _search_steam(name):
                     if not (m and mid):
                         continue
                     nm = m.group(1).strip()
-                    if _fuzzy_hit(name_l, nm.lower()):
+                    if _fuzzy_hit(name_l, nm.lower()) or _fuzzy_hit(name_r, _to_ru(nm)):
                         if best is None or _rank(nm.lower(), name_l) > _rank(best[1], name_l):
                             best = (mid.group(1), nm)
                 except Exception:
@@ -201,22 +256,6 @@ def _ps_run(script):
     )
 
 
-_NAME_MAP = {
-    "блокнот": "notepad",
-    "калькулятор": "calculator",
-    "проводник": "explorer",
-    "файловый менеджер": "explorer",
-    "стим": "steam",
-    "телеграм": "telegram",
-    "дискорд": "discord",
-    "спотифай": "spotify",
-    "ворд": "winword",
-    "эксель": "excel",
-    "пейнт": "mspaint",
-    "фотошоп": "photoshop",
-}
-
-
 def close_app(name):
     import ctypes
     from ctypes import wintypes
@@ -224,9 +263,7 @@ def close_app(name):
     name = (name or "").strip().strip('"').lower()
     if not name:
         return L("Какое приложение закрыть?", "Which app should I close?")
-    name_l = name.removesuffix(".exe")
-    if name_l in _NAME_MAP:
-        name_l = _NAME_MAP[name_l]
+    name_l = _resolve_name(name).removesuffix(".exe")
     user32 = ctypes.windll.user32
 
     def close_by_title():
@@ -448,10 +485,13 @@ def _list_modes():
 
 
 def _parse_res(value):
-    v = value.strip().lower().replace("*", "x").replace("х", "x")
+    v = value.strip().lower().replace("*", "x").replace("х", "x").replace("на", "x")
     m = re.match(r"^(\d+)\s*x\s*(\d+)$", v)
     if m:
         return int(m.group(1)), int(m.group(2))
+    digits = re.sub(r"\D", "", v)
+    if len(digits) == 8:
+        return int(digits[:4]), int(digits[4:])
     common = {"1080p": (1920, 1080), "1440p": (2560, 1440), "2160p": (3840, 2160), "4k": (3840, 2160)}
     return common.get(v, (None, None))
 
@@ -491,6 +531,16 @@ def _set_resolution(value):
                 w, h = _res_prev
             else:
                 return L(f"Я не меняла разрешение. Сейчас {now_w}x{now_h}", f"I did not change the resolution. It is {now_w}x{now_h}")
+        elif value in ("max", "максимум", "максимальное", "максимально", "максимальную"):
+            modes = _list_modes()
+            if not modes:
+                return L("Не удалось получить список разрешений", "Could not get the list of resolutions")
+            w, h = modes[0]
+        elif value in ("min", "минимум", "минимальное", "минимально", "минимальную"):
+            modes = _list_modes()
+            if not modes:
+                return L("Не удалось получить список разрешений", "Could not get the list of resolutions")
+            w, h = modes[-1]
         else:
             w, h = _parse_res(value)
             if not w or not h:
@@ -909,24 +959,92 @@ def _launch_uwp(appid):
     os.startfile(f"shell:AppsFolder\\{appid}")
 
 
+_hint_cache = (0.0, "")
+
+
+def app_hint():
+    global _hint_cache
+    if time.time() - _hint_cache[0] < 60:
+        return _hint_cache[1]
+    names = set()
+    names.update(_APP_ALIASES)
+    names.update(_APP_ALIASES.values())
+    for base in _iter_lnk_dirs():
+        try:
+            for lnk in base.rglob("*.lnk"):
+                names.add(lnk.stem.lower())
+        except Exception:
+            pass
+    try:
+        for n, _appid in _uwp_apps():
+            names.add(n.lower())
+    except Exception:
+        pass
+    prio = []
+    seen = set()
+    for n in (*_APP_ALIASES.values(), *_APP_ALIASES):
+        if n not in seen:
+            seen.add(n)
+            prio.append(n)
+    rest = sorted(names - seen)
+    hint = ", ".join((prio + rest)[:60])
+    _hint_cache = (time.time(), hint)
+    return hint
+
+
+_WEB_APPS = {
+    "youtube": "https://www.youtube.com",
+    "vk": "https://vk.com",
+    "вконтакте": "https://vk.com",
+    "instagram": "https://www.instagram.com",
+    "tiktok": "https://www.tiktok.com",
+    "twitter": "https://x.com",
+    "x": "https://x.com",
+    "facebook": "https://www.facebook.com",
+    "twitch": "https://www.twitch.tv",
+    "netflix": "https://www.netflix.com",
+    "github": "https://github.com",
+    "reddit": "https://www.reddit.com",
+    "wikipedia": "https://ru.wikipedia.org",
+    "википедия": "https://ru.wikipedia.org",
+}
+
+
 def open_app(name):
-    name = name.strip().strip('"')
+    name = _resolve_name(name)
     if os.path.isfile(name):
         os.startfile(name)
         return L(f"Запускаю {name}", f"Launching {name}")
-    lnk = _search_lnk(name)
-    if lnk:
-        os.startfile(lnk)
-        return L(f"Запускаю {name}", f"Launching {name}")
-    exe = _find_exe(name)
-    if exe:
-        subprocess.Popen([exe])
-        return L(f"Запускаю {name}", f"Launching {name}")
-    uwp = _search_uwp(name)
-    if uwp:
-        appid, nm = uwp
-        _launch_uwp(appid)
-        return L(f"Запускаю {nm}", f"Launching {nm}")
+    attempts = [name]
+    first = name.split()[0] if name.split() else ""
+    if first and first != name:
+        attempts.append(first)
+        r = _resolve_name(first)
+        if r != first:
+            attempts.append(r)
+    for cand in attempts:
+        lnk = _search_lnk(cand, allow_url=True)
+        if lnk:
+            target = _lnk_target(lnk)
+            if target.lower().startswith(("http://", "https://")):
+                webbrowser.open(target)
+                return L(f"Открыл {cand} в браузере", f"Opened {cand} in the browser")
+            os.startfile(lnk)
+            return L(f"Запускаю {cand}", f"Launching {cand}")
+        exe = _find_exe(cand)
+        if exe:
+            subprocess.Popen([exe])
+            return L(f"Запускаю {cand}", f"Launching {cand}")
+        uwp = _search_uwp(cand)
+        if uwp:
+            appid, nm = uwp
+            _launch_uwp(appid)
+            return L(f"Запускаю {nm}", f"Launching {nm}")
+    for cand in attempts:
+        site = _WEB_APPS.get(cand)
+        if site:
+            webbrowser.open(site)
+            return L(f"Открыл {cand} в браузере", f"Opened {cand} in the browser")
     return L(
         f"Не нашёл приложение {name}. Скажите название как в меню Пуск",
         f"Could not find the app {name}. Say its name as it appears in the Start menu",
@@ -934,7 +1052,7 @@ def open_app(name):
 
 
 def open_game(name):
-    name = name.strip().strip('"')
+    name = _resolve_name(name)
     if not name:
         return L("Назовите игру", "Name the game")
     hit = _search_steam(name)
@@ -1182,7 +1300,8 @@ def exit_assistant():
 
 def get_weather(city=None):
     lang = i18n.get_language()
-    city = (city or CITY).strip()
+    city = (city or memory.get_city() or CITY).strip()
+    city = memory.normalize_city(city)
     try:
         geo = json.load(
             urllib.request.urlopen(
@@ -1224,7 +1343,28 @@ def get_weather(city=None):
         )
 
 
+def remember(fact):
+    fact = (fact or "").strip().strip('"')
+    if not fact:
+        return L("Что запомнить?", "What should I remember?")
+    memory.add_fact(fact)
+    name = memory.get_name()
+    suffix = f", {name}" if name else ""
+    return L(f"Запомнила{suffix}", f"Got it{suffix}")
+
+
+def forget(keyword):
+    kw = (keyword or "").strip().strip('"')
+    if not kw:
+        return L("Что забыть?", "What should I forget?")
+    if memory.forget_fact(kw):
+        return L(f"Забыла про {kw}", f"Forgot about {kw}")
+    return L(f"Не помню ничего про {kw}", f"I don't remember anything about {kw}")
+
+
 REGISTRY = {
+    "remember": (remember, "запомнить факт о пользователе на будущее, params: fact"),
+    "forget": (forget, "забыть ранее запомненный факт по ключевому слову, params: keyword"),
     "open_app": (open_app, "запустить приложение или программу по имени или пути, params: name"),
     "open_game": (open_game, "запустить игру (Steam, Game Pass или ярлык), params: name"),
     "close_app": (close_app, "закрыть запущенное приложение или программу по имени, params: name"),

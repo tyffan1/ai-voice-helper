@@ -74,11 +74,18 @@ def _edge_synth(text, path, lang):
     async def _run():
         await asyncio.wait_for(
             edge_tts.Communicate(text, EDGE_VOICES.get(lang, EDGE_VOICES["ru"]), rate="-5%").save(mp3),
-            timeout=12,
+            timeout=10,
         )
 
+    for _ in range(2):
+        try:
+            asyncio.run(_run())
+            break
+        except Exception:
+            continue
+    else:
+        return False
     try:
-        asyncio.run(_run())
         dec = miniaudio.decode_file(mp3)
         data = np.frombuffer(dec.samples, dtype=np.int16)
         if dec.nchannels > 1:
@@ -98,6 +105,18 @@ def _edge_synth(text, path, lang):
             pass
 
 
+def warm_edge():
+    import tempfile
+
+    try:
+        f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        f.close()
+        _edge_synth("Атом", f.name, "ru")
+        os.remove(f.name)
+    except Exception:
+        pass
+
+
 def _sapi_synth(text, path):
     import comtypes.client
 
@@ -115,7 +134,7 @@ def synth_to_wav(text, path, lang=None):
     if _engine_for(lang) == "edge":
         if _edge_synth(text, path, lang):
             return
-        _edge_cooldown = time.time() + 120
+        _edge_cooldown = time.time() + 60
     if lang == "ru" and _sapi_voice():
         try:
             _sapi_synth(text, path)

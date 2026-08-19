@@ -1,11 +1,36 @@
-﻿import re
+﻿import datetime
+import re
 import threading
 import time
 
 import numpy as np
 
-from assistant import audio, actions, i18n, llm, stt, tts
+from assistant import audio, actions, i18n, llm, memory, stt, tts
 from assistant.i18n import L
+
+_MEM_NAME_RE = re.compile(
+    r"^(?:называй|зови|зовут)\s+меня\s+(.+)$"
+    r"|^меня\s+зовут\s+(.+)$"
+    r"|^запомни(?:,)?\s+что\s+меня\s+зовут\s+(.+)$"
+    r"|^(?:my name is|call me|you can call me)\s+(.+)$",
+    re.IGNORECASE,
+)
+_MEM_CITY_RE = re.compile(
+    r"^(?:я\s+живу\s+в\s+|живу\s+в\s+|мой\s+город\s+"
+    r"|запомни(?:,)?\s+мой\s+город\s+"
+    r"|запомни(?:,)?\s+что\s+(?:мой\s+город|я\s+живу\s+в)\s+"
+    r"|i live in\s+)(.+)$",
+    re.IGNORECASE,
+)
+_MEM_FACT_RE = re.compile(r"^(?:запомни(?:,)?(?:\s+что)?|remember(?: that)?)\s+(.+)$", re.IGNORECASE)
+_MEM_FORGET_RE = re.compile(r"^(?:забудь(?:,)?(?:\s+про)?|forget(?: about)?)\s+(.+)$", re.IGNORECASE)
+_MEM_RECALL_RE = re.compile(
+    r"^(?:что\s+ты\s+(?:знаешь|помнишь)(?:\s+обо\s+мне)?"
+    r"|что\s+ты\s+обо\s+мне\s+(?:знаешь|помнишь)"
+    r"|как\s+меня\s+зовут"
+    r"|what do you (?:know|remember) about me)\s*\??$",
+    re.IGNORECASE,
+)
 
 _LAUNCH_RE = re.compile(
     r"^(запусти|запустите|запускай|открой|откройте|включи|включите|open|launch|start|play)\s+(.+)$",
@@ -80,18 +105,23 @@ def _repeat():
     return L("Не расслышал, повторите", "Sorry, didn't catch that, say it again")
 
 
-def _edit_distance(a, b):
-    prev = list(range(len(b) + 1))
-    for i in range(1, len(a) + 1):
-        cur = [i] + [0] * len(b)
-        for j in range(1, len(b) + 1):
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
-        prev = cur
-    return prev[len(b)]
-
-
 def _matches_wake(word, name):
-    return _edit_distance(word, name) <= max(1, len(name) // 3)
+    return actions._edit_distance(word, name) <= max(1, len(name) // 3)
+
+
+def _extract_name(text):
+    t = re.sub(r"[^\w\s]", "", (text or "")).strip().lower()
+    if not t:
+        return None
+    if any(x in t for x in ("не знаю", "не скажу", "не помню", "не хочу")):
+        return None
+    for pat in (r"^(зови меня|называй меня|зовут меня|меня зовут|моё имя|меня звать|я)\s+",
+                r"^(my name is|i am|i'm|call me|it's)\s+"):
+        t = re.sub(pat, "", t, flags=re.I)
+    t = t.strip()
+    if not t or len(t) < 2:
+        return None
+    return " ".join(w.capitalize() for w in t.split()[:2])[:40]
 
 
 def strip_wake(text, name=None):
@@ -99,8 +129,9 @@ def strip_wake(text, name=None):
 
     name = name or i18n.wake_name()
     words = re.sub(r"[^\w\s]", "", text.lower()).split()
-    if words and _matches_wake(words[0], name):
-        return " ".join(words[1:]).strip()
+    for i in range(min(3, len(words))):
+        if _matches_wake(words[i], name):
+            return " ".join(words[i + 1 :]).strip()
     return None
 
 
@@ -112,6 +143,7 @@ class Controller:
         self.wake_enabled = True
         self.wake_awaiting = False
         self._wake_seen_at = 0.0
+        self._beep_at = 0.0
         self.on_exit = None
 
     @property
@@ -145,6 +177,21 @@ class Controller:
         if res.startswith(fail):
             res = actions.execute("open_app", {"name": name})
         return res
+
+    def _fallback_launch_close(self, text, atom):
+        name = self._launch_fallback(text)
+        if name:
+            result = self._launch_or_app(name)
+            self.emit_log(f"{atom} {result}")
+            self._speak(result)
+            return True
+        name = self._close_fallback(text)
+        if name:
+            result = actions.execute("close_app", {"name": name})
+            self.emit_log(f"{atom} {result}")
+            self._speak(result)
+            return True
+        return False
 
     def _close_fallback(self, text):
         m = _CLOSE_RE.match(text.strip())
@@ -200,6 +247,41 @@ class Controller:
             return last
         return None
 
+    def _memory_handle(self, text):
+        m = _MEM_NAME_RE.match(text)
+        if m:
+            name = next(g for g in m.groups() if g).strip().strip('"')
+            if memory.set_name(name):
+                return L(f"Отлично, буду называть тебя {name}", f"Great, I will call you {name}")
+        m = _MEM_CITY_RE.match(text)
+        if m:
+            raw = m.group(1).strip().strip('"')
+            if memory.set_city(raw):
+                city = memory.get_city()
+                return L(f"Запомнила, твой город — {city}", f"Got it, your city is {city}")
+        m = _MEM_RECALL_RE.match(text)
+        if m:
+            parts = memory.describe(i18n.get_language())
+            if parts:
+                return " ".join(parts)
+            return L(
+                "Пока ничего о тебе не знаю. Скажи, например: меня зовут Макс",
+                "I don't know anything about you yet. Say, for example: my name is Max",
+            )
+        m = _MEM_FACT_RE.match(text)
+        if m:
+            fact = m.group(1).strip().strip('"')
+            if memory.add_fact(fact):
+                name = memory.get_name()
+                return L(f"Запомнила{', ' + name if name else ''}", f"Got it{', ' + name if name else ''}")
+        m = _MEM_FORGET_RE.match(text)
+        if m:
+            kw = m.group(1).strip().strip('"')
+            if memory.forget_fact(kw):
+                return L(f"Забыла про {kw}", f"Forgot about {kw}")
+            return L(f"Не помню ничего про {kw}", f"I don't remember anything about {kw}")
+        return None
+
     def handle_text(self, text):
         text = text.strip()
         if not text or len(text) < 3:
@@ -216,6 +298,11 @@ class Controller:
                     self.emit_log(f"{atom} {msg}")
                     self._speak(msg)
                     return
+            memory_msg = self._memory_handle(text)
+            if memory_msg:
+                self.emit_log(f"{atom} {memory_msg}")
+                self._speak(memory_msg)
+                return
             if _SEARCH_DIRECT_RE.match(text) and not _LAUNCH_RE.match(text):
                 self.emit_status(_thinking(), "#ff9800")
                 summary = self._verify_fact(text)
@@ -230,17 +317,7 @@ class Controller:
             self.emit_status(_thinking(), "#ff9800")
             decision = llm.ask(text)
             if "reply" in decision:
-                name = self._launch_fallback(text)
-                if name:
-                    result = self._launch_or_app(name)
-                    self.emit_log(f"{atom} {result}")
-                    self._speak(result)
-                    return
-                name = self._close_fallback(text)
-                if name:
-                    result = actions.execute("close_app", {"name": name})
-                    self.emit_log(f"{atom} {result}")
-                    self._speak(result)
+                if self._fallback_launch_close(text, atom):
                     return
                 if _FACT_RE.match(text) or _SEARCH_RE.match(text):
                     summary = self._verify_fact(text)
@@ -254,17 +331,7 @@ class Controller:
             tool = decision.get("tool")
             params = decision.get("params") or {}
             if tool not in actions.REGISTRY:
-                name = self._launch_fallback(text)
-                if name:
-                    result = self._launch_or_app(name)
-                    self.emit_log(f"{atom} {result}")
-                    self._speak(result)
-                    return
-                name = self._close_fallback(text)
-                if name:
-                    result = actions.execute("close_app", {"name": name})
-                    self.emit_log(f"{atom} {result}")
-                    self._speak(result)
+                if self._fallback_launch_close(text, atom):
                     return
                 self.emit_log(f"{atom} {tool}")
                 self._speak(
@@ -322,14 +389,21 @@ class Controller:
                 self._speak(_repeat())
                 return
             wav = audio.temp_wav(recording)
-            text = stt.transcribe(wav)
+            text = stt.transcribe(wav, hint=actions.app_hint())
             print(f"[{source}] recognized: {text}")
             self.handle_text(text)
 
     def wake_session(self, clip):
         with self.busy:
+            if time.time() - self._beep_at < 0.6:
+                print("[wake] ignoring beep echo")
+                return
+            rms = float((clip.astype(np.float32) ** 2).mean() ** 0.5)
+            if rms < 8.0:
+                print("[wake] ignoring noise clip")
+                return
             wav = audio.temp_wav(clip)
-            text = stt.transcribe(wav, wake=True)
+            text = stt.transcribe(wav, wake=True, hint=actions.app_hint())
             print(f"[wake] {text}")
             try:
                 from assistant.wake import _log
@@ -358,7 +432,61 @@ class Controller:
             if rest:
                 self.handle_text(rest)
             else:
+                self._beep_at = time.time()
                 audio.beep(660.0, 0.08)
                 self.wake_awaiting = True
                 self._wake_seen_at = time.time()
                 print("[wake] waiting for command...")
+
+    def greet(self):
+        def _run():
+            stt.load()
+            time.sleep(1.5)
+            with self.busy:
+                name = memory.get_name()
+                if name:
+                    hour = datetime.datetime.now().hour
+                    if hour < 5:
+                        part = L("Доброй ночи", "Good night")
+                    elif hour < 12:
+                        part = L("Доброе утро", "Good morning")
+                    elif hour < 18:
+                        part = L("Добрый день", "Good afternoon")
+                    else:
+                        part = L("Добрый вечер", "Good evening")
+                    msg = f"{part}, {name}! {L('Чем могу помочь?', 'How can I help?')}"
+                    atom = L("Атом:", "Atom:")
+                    self.emit_log(f"{atom} {msg}")
+                    self._speak(msg)
+                else:
+                    self._ask_name()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _ask_name(self):
+        atom = L("Атом:", "Atom:")
+        questions = [
+            L("Привет! Я Атом. А как тебя зовут?", "Hi! I'm Atom. What's your name?"),
+            L("Не расслышала. Скажи ещё раз, как тебя зовут?", "Sorry, didn't catch that. What's your name again?"),
+        ]
+        for question in questions:
+            self.emit_log(f"{atom} {question}")
+            self._speak(question)
+            recording = audio.record_until_silence(max_sec=8)
+            rms = float((recording.astype(np.float32) ** 2).mean() ** 0.5)
+            if rms < 8.0:
+                continue
+            wav = audio.temp_wav(recording)
+            text = stt.transcribe(wav, hint="меня зовут, зови меня, как тебя зовут, моё имя, my name is")
+            name = _extract_name(text)
+            if name and memory.set_name(name):
+                msg = L(f"Приятно познакомиться, {name}!", f"Nice to meet you, {name}!")
+                self.emit_log(f"{atom} {msg}")
+                self._speak(msg)
+                return
+        msg = L(
+            "Ладно, скажешь потом. Например: меня зовут Костя",
+            "Alright, tell me later. For example: my name is Max",
+        )
+        self.emit_log(f"{atom} {msg}")
+        self._speak(msg)
