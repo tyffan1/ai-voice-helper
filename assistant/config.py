@@ -38,7 +38,7 @@ PIPER_VOICES = {
 }
 
 HOTKEY = os.environ.get("ASSISTANT_HOTKEY", "<ctrl>+<shift>+<space>")
-CITY = os.environ.get("ASSISTANT_CITY", "Москва")
+CITY = os.environ.get("ASSISTANT_CITY", "Киев")
 WAKE_NAME = os.environ.get("ASSISTANT_WAKE_NAME", "атом")
 WAKE_VOLUME_THRESHOLD = 500
 SAMPLE_RATE = 16000
