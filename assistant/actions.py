@@ -5,13 +5,16 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
 import urllib.request
 import webbrowser
+import winreg
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -373,8 +376,10 @@ def _set_wifi(value):
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        creationflags=subprocess.CREATE_NO_WINDOW)
     if r.returncode != 0:
-        return L("Нужны права администратора для управления вайфаем",
-                 "Administrator rights are required to control Wi-Fi")
+        ok = _run_elevated(f'netsh interface set interface name="{name}" admin={want}')
+        if not ok:
+            return L("Нужны права администратора для управления вайфаем",
+                     "Administrator rights are required to control Wi-Fi")
     return L(f"Вайфай {'включён' if want == 'enabled' else 'выключен'}",
              f"Wi-Fi turned {'on' if want == 'enabled' else 'off'}")
 
@@ -394,8 +399,13 @@ def _set_bluetooth(value):
     if "NOT_FOUND" in out:
         return L("Не нашёл блютуз-адаптер", "Could not find a Bluetooth adapter")
     if "Access" in out or "отказано" in out or (r.returncode != 0 and not out):
-        return L("Нужны права администратора для управления блютузом",
-                 "Administrator rights are required to control Bluetooth")
+        ok = _run_elevated(
+            "$bt = Get-PnpDevice -Class Bluetooth -PresentOnly | Where-Object {$_.FriendlyName -match 'Radio'} | Select-Object -First 1;"
+            f"if ($bt) {{ Set-PnpDevice -InstanceId $bt.InstanceId -Status {want} }}"
+        )
+        if not ok:
+            return L("Нужны права администратора для управления блютузом",
+                     "Administrator rights are required to control Bluetooth")
     return L(f"Блютуз {'включён' if want == 'Enabled' else 'выключен'}",
              f"Bluetooth turned {'on' if want == 'Enabled' else 'off'}")
 
@@ -581,6 +591,538 @@ def _sleep_now():
         return L("Не удалось усыпить компьютер", "Could not put the computer to sleep")
 
 
+_ON_WORDS = {"on", "вкл", "включи", "включить", "включай", "1", "да", "включено", "enabled"}
+_OFF_WORDS = {"off", "выкл", "выключи", "выключить", "выключай", "0", "нет", "выключено", "disabled"}
+
+
+def _on_off(value):
+    v = (value or "").strip().lower()
+    if v in _ON_WORDS:
+        return 1
+    if v in _OFF_WORDS:
+        return 0
+    return None
+
+
+def _num(value):
+    m = re.search(r"\d+", str(value or ""))
+    return int(m.group()) if m else None
+
+
+def _reg_dword(path, name, val):
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, int(val))
+        return True
+    except Exception:
+        return False
+
+
+def _reg_str(path, name, val):
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, str(val))
+        return True
+    except Exception:
+        return False
+
+
+def _reg_bin(path, name, data):
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, name, 0, winreg.REG_BINARY, bytes(data))
+        return True
+    except Exception:
+        return False
+
+
+def _reg_get_bin(path, name):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
+            v, _t = winreg.QueryValueEx(k, name)
+        return bytearray(v)
+    except Exception:
+        return None
+
+
+def _broadcast():
+    try:
+        HWND_BROADCAST, WM_SETTINGCHANGE = 0xFFFF, 0x001A
+        ctypes.windll.user32.SendMessageTimeoutW(
+            HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0, 2, 3000, ctypes.byref(ctypes.c_long())
+        )
+    except Exception:
+        pass
+
+
+def _restart_explorer():
+    try:
+        _ps_run("Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Sleep 1; Start-Process explorer")
+        return True
+    except Exception:
+        return False
+
+
+def _set_power_plan(value):
+    v = (value or "").strip().lower()
+    if any(w in v for w in ("баланс", "balanced", "обычн")):
+        cands = ("баланс", "balanced")
+        label = L("сбалансированный", "balanced")
+    elif any(w in v for w in ("производительн", "performance", "максимальн", "игров")):
+        cands = ("производительн", "high performance", "performance", "ultimate")
+        label = L("высокая производительность", "high performance")
+    elif any(w in v for w in ("энергосбереж", "экономи", "saver", "economy")):
+        cands = ("энергосбереж", "power saver", "saver", "экономи")
+        label = L("энергосбережение", "power saver")
+    else:
+        return L(
+            "Какой план питания: сбалансированный, высокая производительность или энергосбережение?",
+            "Which power plan: balanced, high performance or power saver?",
+        )
+    r = _ps_run("powercfg /list")
+    for line in r.stdout.splitlines():
+        low = line.lower()
+        if any(c in low for c in cands):
+            guid = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", low)
+            if guid:
+                _ps_run(f"powercfg /setactive {guid.group(1)}")
+                return L(f"План питания: {label}", f"Power plan: {label}")
+    return L("Не нашёл такой план питания", "Could not find that power plan")
+
+
+def _set_power_timeout(kind, value):
+    mins = _num(value)
+    if mins is None:
+        return L("Через сколько минут? Например: 10 минут", "In how many minutes? For example: 10")
+    mins = max(0, min(1440, mins))
+    r = _ps_run(f"powercfg /change {kind}-timeout-ac {mins}; powercfg /change {kind}-timeout-dc {mins}")
+    if r.returncode != 0:
+        return L("Не удалось изменить таймаут", "Could not change the timeout")
+    names = {
+        "standby": (L("сон", "sleep"), L("Компьютер засыпает через", "The computer sleeps after")),
+        "monitor": (L("гашение экрана", "monitor off"), L("Экран гаснет через", "The monitor turns off after")),
+        "hibernate": (L("гибернацию", "hibernation"), L("Гибернация через", "Hibernation after")),
+    }
+    label, msg = names[kind]
+    if mins == 0:
+        return L(f"{msg} никогда (отключено)", f"{msg} never (disabled)")
+    return L(f"{msg} {mins} минут", f"{msg} {mins} minutes")
+
+
+def _set_wallpaper(value):
+    v = (value or "").strip().strip('"')
+    if not v:
+        return L(
+            "Скажите путь к картинке для обоев, например: картинки моя фотография",
+            "Say the path to a picture for the wallpaper, e.g.: pictures my photo",
+        )
+    path = None
+    if os.path.isfile(v):
+        path = v
+    else:
+        for base in (Path.home() / "Pictures", Path.home() / "Desktop", Path.home() / "Downloads"):
+            try:
+                for f in base.rglob("*"):
+                    if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp") and v.lower() in f.stem.lower():
+                        path = str(f)
+                        break
+            except Exception:
+                continue
+            if path:
+                break
+    if not path:
+        return L(f"Не нашёл картинку {v}", f"Could not find the picture {v}")
+    try:
+        SPI_SETDESKWALLPAPER = 0x0014
+        SPIF_UPDATEINIFILE, SPIF_SENDCHANGE = 0x0001, 0x0002
+        res = ctypes.windll.user32.SystemParametersInfoW(
+            SPI_SETDESKWALLPAPER, 0, os.path.abspath(path), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
+        )
+        if res:
+            return L(f"Установил обои: {os.path.basename(path)}", f"Wallpaper set: {os.path.basename(path)}")
+    except Exception:
+        pass
+    return L("Не удалось сменить обои", "Could not change the wallpaper")
+
+
+_ACCENT_COLORS = {
+    "красн": 0x0000FF, "red": 0x0000FF,
+    "зелён": 0x00FF00, "зелен": 0x00FF00, "green": 0x00FF00,
+    "син": 0xFF0000, "blue": 0xFF0000,
+    "жёлт": 0x00FFFF, "желт": 0x00FFFF, "yellow": 0x00FFFF,
+    "фиолет": 0xFF00FF, "purple": 0xFF00FF, "сиренев": 0xFF00FF,
+    "голуб": 0xFFFF00, "cyan": 0xFFFF00, "aqua": 0xFFFF00, "бирюз": 0xFFFF00,
+    "оранж": 0x007FFF, "orange": 0x007FFF,
+    "розов": 0xB469FF, "pink": 0xB469FF,
+    "чёрн": 0x000000, "черн": 0x000000, "black": 0x000000,
+    "бел": 0xFFFFFF, "white": 0xFFFFFF,
+    "сер": 0x808080, "grey": 0x808080, "gray": 0x808080, "серебр": 0xC0C0C0,
+    "золот": 0x00D7FF, "gold": 0x00D7FF,
+    "коричн": 0x0080FF, "brown": 0x0080FF,
+}
+
+
+def _set_accent_color(value):
+    v = (value or "").strip().lower().lstrip("#")
+    color = None
+    for name, code in _ACCENT_COLORS.items():
+        if v.startswith(name):
+            color = code
+            break
+    if color is None and re.fullmatch(r"[0-9a-f]{6}", v):
+        r, g, b = int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
+        color = (b << 16) | (g << 8) | r
+    if color is None:
+        return L(
+            "Какой цвет акцента? Например: красный, синий, зелёный, фиолетовый или HEX-код",
+            "Which accent color? For example: red, blue, green, purple or a HEX code",
+        )
+    dwm = 0xAA000000 | color
+    _reg_dword(r"Software\Microsoft\Windows\DWM", "AccentColor", dwm)
+    _reg_dword(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "ColorPrevalence", 1)
+    _broadcast()
+    return L("Цвет акцента изменён", "Accent color changed")
+
+
+def _set_explorer_option(kind, value):
+    on = _on_off(value)
+    if on is None:
+        return L("Скажите: включить или выключить", "Say: turn on or off")
+    base = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    if kind == "hidden":
+        _reg_dword(base, "Hidden", 2 if on else 1)
+        _reg_dword(base, "ShowSuperHidden", 1 if on else 0)
+        label = L("скрытые файлы", "hidden files")
+    else:
+        _reg_dword(base, "HideFileExt", 0 if on else 1)
+        label = L("расширения файлов", "file extensions")
+    _broadcast()
+    _restart_explorer()
+    return L(
+        f"{'Показал' if on else 'Скрыл'} {label}",
+        f"{'Showed' if on else 'Hidden'} {label}",
+    )
+
+
+def _set_taskbar_autohide(value):
+    on = _on_off(value)
+    if on is None:
+        return L("Скажите: включить или выключить автопрятие панели задач", "Say: turn taskbar autohide on or off")
+    path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StuckRects3"
+    data = _reg_get_bin(path, "Settings")
+    if not data or len(data) < 9:
+        data = bytearray([0x1C, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    data[8] = 3 if on else 2
+    _reg_bin(path, "Settings", data)
+    _restart_explorer()
+    return L(
+        f"Панель задач {'автоматически скрывается' if on else 'всегда видна'}",
+        f"Taskbar {'autohides' if on else 'is always visible'}",
+    )
+
+
+def _set_mouse_speed(value):
+    n = _num(value)
+    if n is None:
+        return L("Скажите скорость от 1 до 20", "Say a speed from 1 to 20")
+    n = max(1, min(20, n))
+    try:
+        SPI_SETMOUSESPEED = 0x0071
+        ctypes.windll.user32.SystemParametersInfoW(SPI_SETMOUSESPEED, 0, n, 1)
+        _reg_str(r"Control Panel\Mouse", "MouseSpeed", "1")
+        _reg_str(r"Control Panel\Mouse", "MouseThreshold1", str(n))
+        return L(f"Скорость мыши: {n}", f"Mouse speed: {n}")
+    except Exception:
+        return L("Не удалось изменить скорость мыши", "Could not change the mouse speed")
+
+
+def _set_keyboard(kind, value):
+    n = _num(value)
+    if n is None:
+        return L("Скажите число", "Say a number")
+    try:
+        if kind == "delay":
+            n = max(0, min(3, n))
+            SPI_SETKEYBOARDDELAY = 0x0017
+            label = L("задержка повтора клавиш", "key repeat delay")
+        else:
+            n = max(0, min(31, n))
+            SPI_SETKEYBOARDSPEED = 0x000B
+            label = L("скорость повтора клавиш", "key repeat speed")
+        ctypes.windll.user32.SystemParametersInfoW(
+            SPI_SETKEYBOARDDELAY if kind == "delay" else SPI_SETKEYBOARDSPEED, 0, n, 1
+        )
+        return L(f"{label}: {n}", f"{label}: {n}")
+    except Exception:
+        return L("Не удалось изменить клавиатуру", "Could not change the keyboard")
+
+
+class _SYSTEMTIME(ctypes.Structure):
+    _fields_ = [
+        ("wYear", ctypes.c_ushort),
+        ("wMonth", ctypes.c_ushort),
+        ("wDayOfWeek", ctypes.c_ushort),
+        ("wDay", ctypes.c_ushort),
+        ("wHour", ctypes.c_ushort),
+        ("wMinute", ctypes.c_ushort),
+        ("wSecond", ctypes.c_ushort),
+        ("wMilliseconds", ctypes.c_ushort),
+    ]
+
+
+_RU_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+
+def _run_elevated(ps1_body):
+    """Run a PowerShell script elevated via UAC. Returns True if the user accepted."""
+    ps1 = tempfile.NamedTemporaryFile(
+        suffix=".ps1", delete=False, mode="w", encoding="utf-8", newline="\r\n"
+    )
+    try:
+        ps1.write(ps1_body)
+        ps1.close()
+        inner = f"-NoProfile -ExecutionPolicy Bypass -File \"{ps1.name}\""
+        r = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", f"Start-Process powershell -Verb RunAs -Wait -ArgumentList '{inner}'"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW, timeout=180,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(ps1.name)
+        except Exception:
+            pass
+
+
+def _set_system_clock(hour=None, minute=None, day=None, month=None, year=None):
+    try:
+        st = _SYSTEMTIME()
+        ctypes.windll.kernel32.GetSystemTime(ctypes.byref(st))
+        if hour is not None:
+            st.wHour, st.wMinute = hour, minute
+        if day is not None:
+            st.wYear, st.wMonth, st.wDay = year, month, day
+        ok = ctypes.windll.kernel32.SetSystemTime(ctypes.byref(st))
+        return ok != 0
+    except Exception:
+        return False
+
+
+def _set_time(value):
+    v = (value or "").strip().lower()
+    hour = minute = None
+    m = re.search(r"(\d{1,2})[:\-\.](\d{1,2})", v)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+    else:
+        nums = re.findall(r"\d{1,2}", v)
+        if nums:
+            hour = int(nums[0])
+            m2 = re.search(r"(\d{1,2})\s*(?:минут|мин)", v)
+            minute = int(m2.group(1)) if m2 else (int(nums[1]) if len(nums) > 1 else 0)
+    if hour is None or not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        return L(
+            "Скажите время, например: поставь время 16:53 или 16 часов 53 минуты",
+            "Say the time, e.g.: set the time to 16:53 or 4:53 pm",
+        )
+    target = datetime.datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if not _set_system_clock(hour=hour, minute=minute):
+        ok = _run_elevated(f'Set-Date -Date "{target.strftime("%Y-%m-%d %H:%M:%S")}"')
+        if not ok:
+            return L(
+                "Не удалось изменить время: отклонили запрос прав администратора",
+                "Could not change the time: the administrator request was declined",
+            )
+        now = datetime.datetime.now()
+        if abs((now - target).total_seconds()) > 120:
+            return L(
+                "Не удалось изменить время: нужны права администратора",
+                "Could not change the time: administrator rights are required",
+            )
+    return L(f"Время установлено: {hour:02d}:{minute:02d}", f"Time set to {hour:02d}:{minute:02d}")
+
+
+def _set_date(value):
+    v = (value or "").strip().lower()
+    day = month = year = None
+    m = re.search(r"(\d{1,2})[\.\-/](\d{1,2})(?:[\.\-/](\d{2,4}))?", v)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else None
+    else:
+        nums = re.findall(r"\d{1,4}", v)
+        for name, num in _RU_MONTHS.items():
+            if name in v:
+                month = num
+                break
+        if month:
+            if nums:
+                day = int(nums[0])
+            if len(nums) > 1:
+                y = int(nums[1])
+                year = y if y > 1000 else 2000 + y
+        elif len(nums) >= 2:
+            day, month = int(nums[0]), int(nums[1])
+    if not day or not month or day > 31 or month > 12:
+        return L(
+            "Скажите дату, например: поставь дату 20 августа 2026",
+            "Say the date, e.g.: set the date to 20 August 2026",
+        )
+    year = year or datetime.datetime.now().year
+    try:
+        dt = datetime.datetime.now().replace(day=day, month=month, year=year)
+    except ValueError:
+        return L("Неправильная дата", "Invalid date")
+    if not _set_system_clock(day=dt.day, month=dt.month, year=dt.year):
+        ok = _run_elevated(f'Set-Date -Date "{dt.strftime("%Y-%m-%d %H:%M:%S")}"')
+        if not ok:
+            return L(
+                "Не удалось изменить дату: отклонили запрос прав администратора",
+                "Could not change the date: the administrator request was declined",
+            )
+        now = datetime.datetime.now()
+        if abs((now - dt).total_seconds()) > 120:
+            return L(
+                "Не удалось изменить дату: нужны права администратора",
+                "Could not change the date: administrator rights are required",
+            )
+    return L(
+        f"Дата установлена: {dt.day} {list(_RU_MONTHS.keys())[dt.month - 1]} {dt.year} года",
+        f"Date set to {dt.day} {_MONTHS_EN[dt.month - 1]} {dt.year}",
+    )
+
+
+def _set_time_format(value):
+    on = _on_off(value)
+    if on is None:
+        if any(w in (value or "").lower() for w in ("24", "двадцатичетыр", "двадцать четыре")):
+            on = 1
+        elif any(w in (value or "").lower() for w in ("12", "двенадцат")):
+            on = 0
+        else:
+            return L("Скажите: 24 часа или 12 часов", "Say: 24 hours or 12 hours")
+    base = r"Control Panel\International"
+    if on:
+        _reg_str(base, "iTime", "1")
+        _reg_str(base, "iTLZero", "1")
+        _reg_str(base, "sShortTime", "HH:mm")
+        _reg_str(base, "sLongTime", "HH:mm:ss")
+        label = L("24-часовой формат времени", "24-hour time format")
+    else:
+        _reg_str(base, "iTime", "0")
+        _reg_str(base, "sShortTime", "h:mm tt")
+        _reg_str(base, "sLongTime", "h:mm:ss tt")
+        label = L("12-часовой формат времени", "12-hour time format")
+    _broadcast()
+    return L(f"Установлен {label} (применится после перезахода)", f"Set {label} (applies after sign-in)")
+
+
+def _set_screensaver(value):
+    v = (value or "").strip().lower()
+    if v in _OFF_WORDS or v in ("нет", "none", "без", "выключить"):
+        _reg_str(r"Control Panel\Desktop", "SCRNSAVE.EXE", "")
+        _reg_str(r"Control Panel\Desktop", "ScreenSaveActive", "0")
+        _broadcast()
+        return L("Заставка выключена", "Screensaver disabled")
+    if v in _ON_WORDS:
+        return L("Какая заставка? Например: 3d текст или путь к .scr", "Which screensaver? E.g.: 3d text or a .scr path")
+    path = None
+    if os.path.isfile(v):
+        path = v
+    else:
+        try:
+            for f in Path(r"C:\Windows\System32").glob("*.scr"):
+                if v in f.stem.lower():
+                    path = str(f)
+                    break
+        except Exception:
+            pass
+    if not path:
+        return L(f"Не нашёл заставку {value}", f"Could not find the screensaver {value}")
+    _reg_str(r"Control Panel\Desktop", "SCRNSAVE.EXE", os.path.abspath(path))
+    _reg_str(r"Control Panel\Desktop", "ScreenSaveActive", "1")
+    _broadcast()
+    return L(f"Заставка: {os.path.basename(path)}", f"Screensaver: {os.path.basename(path)}")
+
+
+def _set_game_mode(value):
+    on = _on_off(value)
+    if on is None:
+        return L("Скажите: включить или выключить режим игры", "Say: turn game mode on or off")
+    _reg_dword(r"Software\Microsoft\GameBar", "AutoGameModeEnabled", on)
+    _reg_dword(r"Software\Microsoft\GameBar", "AllowAutoGameMode", on)
+    _broadcast()
+    return L(
+        f"Режим игры {'включён' if on else 'выключен'}",
+        f"Game mode {'enabled' if on else 'disabled'}",
+    )
+
+
+def _set_clock_seconds(value):
+    on = _on_off(value)
+    if on is None:
+        return L("Скажите: включить или выключить секунды на часах", "Say: turn clock seconds on or off")
+    _reg_dword(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "ShowSecondsInSystemClock", on)
+    _broadcast()
+    return L(
+        f"Секунды на часах {'включены' if on else 'выключены'}",
+        f"Clock seconds {'enabled' if on else 'disabled'}",
+    )
+
+
+def _set_autostart(value):
+    v = (value or "").strip()
+    if not v:
+        return L("Какое приложение добавить в автозагрузку?", "Which app should run at startup?")
+    toks = v.split()
+    first, last = toks[0].lower(), toks[-1].lower()
+    mode = None
+    app = v
+    if first in _ON_WORDS or first in _OFF_WORDS:
+        mode = 1 if first in _ON_WORDS else 0
+        app = " ".join(toks[1:])
+    elif last in _ON_WORDS or last in _OFF_WORDS:
+        mode = 1 if last in _ON_WORDS else 0
+        app = " ".join(toks[:-1])
+    if mode is None:
+        mode = 1
+    if not app:
+        return L("Какое приложение?", "Which app?")
+    startup = (
+        Path(os.environ.get("APPDATA", str(Path.home())))
+        / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    )
+    if mode:
+        lnk = _search_lnk(app)
+        if not lnk:
+            return L(f"Не нашёл приложение {app}", f"Could not find the app {app}")
+        dst = startup / Path(lnk).name
+        try:
+            startup.mkdir(parents=True, exist_ok=True)
+            if not dst.exists():
+                shutil.copy2(lnk, dst)
+            return L(f"Добавил {Path(lnk).stem} в автозагрузку", f"Added {Path(lnk).stem} to startup")
+        except Exception:
+            return L("Не удалось добавить в автозагрузку", "Could not add to startup")
+    removed = []
+    try:
+        for f in startup.glob("*.lnk"):
+            if app.lower() in f.stem.lower():
+                f.unlink()
+                removed.append(f.stem)
+    except Exception:
+        pass
+    if removed:
+        return L(f"Убрал из автозагрузки: {', '.join(removed)}", f"Removed from startup: {', '.join(removed)}")
+    return L(f"{app} не было в автозагрузке", f"{app} was not in startup")
+
+
 def system_setting(setting, value=None):
     s = (setting or "").strip().lower()
     v = (value or "").strip().lower()
@@ -611,9 +1153,53 @@ def system_setting(setting, value=None):
                      "The computer will restart in thirty seconds")
         return L("Точно перезагрузить компьютер? Скажите: подтверждаю",
                  "Restart the computer? Say: confirm")
+    if s in ("power_plan", "план питания", "энергоплан", "power plan", "питание"):
+        return _set_power_plan(v)
+    if s in ("sleep_timeout", "сон через", "таймаут сна", "спящий режим", "засыпа"):
+        return _set_power_timeout("standby", v)
+    if s in ("monitor_timeout", "гаснет экран", "экран гаснет", "таймаут экрана", "погаснет"):
+        return _set_power_timeout("monitor", v)
+    if s in ("hibernate_timeout", "гибернац", "hibernate"):
+        return _set_power_timeout("hibernate", v)
+    if s in ("wallpaper", "обои", "фон рабочего стола", "background", "рабочий стол"):
+        return _set_wallpaper(v)
+    if s in ("accent", "цвет акцента", "accent color", "цвет окна", "цвет пуска"):
+        return _set_accent_color(v)
+    if s in ("hidden", "скрытые файлы", "скрыт"):
+        return _set_explorer_option("hidden", v)
+    if s in ("extensions", "расширения файлов", "расширен"):
+        return _set_explorer_option("extensions", v)
+    if s in ("taskbar_autohide", "автопрятие", "панель задач"):
+        return _set_taskbar_autohide(v)
+    if s in ("mouse_speed", "скорость мыши", "чувствительность мыши", "мыш"):
+        return _set_mouse_speed(v)
+    if s in ("keyboard_delay", "задержка повтора", "задержка клавиш"):
+        return _set_keyboard("delay", v)
+    if s in ("keyboard_speed", "скорость повтора", "скорость клавиш", "повтор клавиш", "клавиатур"):
+        return _set_keyboard("speed", v)
+    if s in ("time_format", "формат времени", "часы 24", "время 24", "12 часов", "24 часа"):
+        return _set_time_format(v)
+    if s in ("time", "часы", "врем") and "формат" not in s:
+        return _set_time(v)
+    if s in ("date", "дата"):
+        return _set_date(v)
+    if s in ("screensaver", "заставка"):
+        return _set_screensaver(v)
+    if s in ("game_mode", "режим игры", "игровой режим", "gamemode"):
+        return _set_game_mode(v)
+    if s in ("clock_seconds", "секунды на часах", "часы с секундами"):
+        return _set_clock_seconds(v)
+    if s in ("autostart", "автозагрузк", "автозапуск", "startup"):
+        return _set_autostart(v)
     return L(
-        f"Не знаю настройку {setting}. Можно: громкость, яркость, вайфай, блютуз, тема, разрешение экрана, экран, сон, перезагрузка",
-        f"Unknown setting {setting}. Try: volume, brightness, wifi, bluetooth, theme, resolution, display, sleep, restart",
+        f"Не знаю настройку {setting}. Можно: громкость, яркость, вайфай, блютуз, тема, цвет акцента, обои, "
+        f"разрешение экрана, экран, сон, план питания, таймаут сна и экрана, скрытые файлы, расширения файлов, "
+        f"автопрятие панели задач, скорость мыши, повтор клавиш, формат времени, заставка, режим игры, "
+        f"секунды на часах, автозагрузка приложений, перезагрузка",
+        f"Unknown setting {setting}. Try: volume, brightness, wifi, bluetooth, theme, accent color, wallpaper, "
+        f"resolution, display, sleep, power plan, sleep/monitor timeout, hidden files, file extensions, "
+        f"taskbar autohide, mouse speed, keyboard repeat, time format, screensaver, game mode, clock seconds, "
+        f"app autostart, restart",
     )
 
 
@@ -1012,6 +1598,7 @@ _WEB_APPS = {
 
 def open_app(name):
     name = _resolve_name(name)
+    name = re.sub(r"\.(exe|lnk)$", "", name, flags=re.IGNORECASE).strip()
     if os.path.isfile(name):
         os.startfile(name)
         return L(f"Запускаю {name}", f"Launching {name}")
@@ -1225,15 +1812,33 @@ _MONTHS_EN = (
 
 
 def set_timer(minutes, message):
+    try:
+        minutes = float(minutes)
+    except (TypeError, ValueError):
+        s = str(minutes or "")
+        m = re.search(r"(\d+)\s*(?:час(?:ов|а)?|ч)\s*(?:(\d+)\s*мин)?", s)
+        if m:
+            minutes = int(m.group(1)) * 60 + (int(m.group(2)) if m.group(2) else 0)
+        elif ":" in s:
+            parts = s.split(":")
+            minutes = int(parts[0]) * 60 + int(parts[1])
+        else:
+            n = _num(s)
+            minutes = n if n is not None else 1
     minutes = max(0.1, float(minutes))
     threading.Timer(
         minutes * 60.0,
         lambda: tts.speak(message),
     ).start()
-    return L(
-        f"Поставил таймер на {minutes:g} минут",
-        f"Timer set for {minutes:g} minutes",
-    )
+    if minutes >= 60:
+        h, mn = divmod(int(minutes), 60)
+        if mn == 0:
+            label = L(f"{h} часов", f"{h} hours")
+        else:
+            label = L(f"{h} часов {mn} минут", f"{h} hours {mn} minutes")
+    else:
+        label = L(f"{minutes:g} минут", f"{minutes:g} minutes")
+    return L(f"Поставил таймер на {label}", f"Timer set for {label}")
 
 
 def get_time():
@@ -1368,7 +1973,7 @@ REGISTRY = {
     "open_app": (open_app, "запустить приложение или программу по имени или пути, params: name"),
     "open_game": (open_game, "запустить игру (Steam, Game Pass или ярлык), params: name"),
     "close_app": (close_app, "закрыть запущенное приложение или программу по имени, params: name"),
-    "system_setting": (system_setting, "изменить настройку системы: громкость, яркость, вайфай, блютуз, тема, экран, сон, перезагрузка, params: setting и value"),
+    "system_setting": (system_setting, "изменить настройку системы: громкость, яркость, вайфай, блютуз, тема, цвет акцента, обои, разрешение экрана, экран, сон, план питания, таймауты сна и экрана, скрытые файлы, расширения файлов, автопрятие панели задач, скорость мыши, повтор клавиш, формат времени, заставка, режим игры, секунды на часах, автозагрузка, перезагрузка, params: setting и value"),
     "web_search": (web_search, "найти информацию в интернете и вернуть ссылки, params: query"),
     "web_query": (web_query, "найти информацию в интернете, открыть лучший результат и вернуть его текст, params: query"),
     "open_url": (open_url, "открыть сайт или поисковый запрос в браузере, params: query"),

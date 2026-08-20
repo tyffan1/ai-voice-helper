@@ -26,6 +26,8 @@ def _load():
                     _profile = {}
                 if not isinstance(_profile.get("facts"), list):
                     _profile["facts"] = []
+                if not isinstance(_profile.get("commands"), list):
+                    _profile["commands"] = []
     return _profile
 
 
@@ -123,6 +125,75 @@ def forget_fact(keyword):
     return removed
 
 
+def _norm_words(value):
+    return re.findall(r"[a-zа-яё0-9]+", (value or "").lower())
+
+
+def get_commands():
+    return [
+        c
+        for c in (_load().get("commands") or [])
+        if isinstance(c, dict) and c.get("trigger") and c.get("action")
+    ]
+
+
+def add_command(trigger, action):
+    trigger = _clean(trigger)
+    action = _clean(action)
+    if not trigger or not action:
+        return False
+    cmds = _load().setdefault("commands", [])
+    low = trigger.lower()
+    for c in cmds:
+        if c["trigger"].lower() == low:
+            c["action"] = action
+            _save()
+            return True
+    cmds.append({"trigger": trigger, "action": action})
+    if len(cmds) > 30:
+        del cmds[: len(cmds) - 30]
+    _save()
+    return True
+
+
+def _match_words(a, b):
+    if len(a) < 3 or len(b) < 3:
+        return a == b
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def find_command(text):
+    tw = _norm_words(text)
+    if not tw:
+        return None
+    tj = " ".join(tw)
+    for cmd in get_commands():
+        cw = _norm_words(cmd["trigger"])
+        if not cw:
+            continue
+        if len(cw) >= 2:
+            if all(any(_match_words(w, t) for t in tw) for w in cw):
+                return cmd
+        elif any(_match_words(cw[0], t) for t in tw):
+            return cmd
+        if " ".join(cw) in tj:
+            return cmd
+    return None
+
+
+def forget_command(keyword):
+    kw = _norm_words(keyword)
+    if not kw:
+        return False
+    cmds = _load().setdefault("commands", [])
+    kept = [c for c in cmds if not any(w in _norm_words(c["trigger"]) for w in kw)]
+    removed = len(kept) != len(cmds)
+    if removed:
+        _load()["commands"] = kept
+        _save()
+    return removed
+
+
 def profile_text(lang="ru"):
     parts = []
     name = get_name()
@@ -144,6 +215,13 @@ def profile_text(lang="ru"):
             parts.append(f"What you know about the user: {shown}.")
         else:
             parts.append(f"Что ты знаешь о пользователе: {shown}.")
+    cmds = get_commands()
+    if cmds:
+        shown = "; ".join(f"«{c['trigger']}» -> {c['action']}" for c in cmds[-15:])
+        if lang == "en":
+            parts.append(f"User-defined commands: {shown}.")
+        else:
+            parts.append(f"Пользовательские команды: {shown}.")
     return "\n".join(parts)
 
 
@@ -161,4 +239,13 @@ def describe(lang="ru"):
             parts.append(f"I remember: {'; '.join(facts)}")
         else:
             parts.append(f"Помню, что {'; '.join(facts)}")
+    cmds = get_commands()
+    if cmds:
+        shown = "; ".join(
+            f"когда «{c['trigger']}» — {c['action']}" for c in cmds
+        )
+        if lang == "en":
+            parts.append(f"I follow these commands: {shown}")
+        else:
+            parts.append(f"Выполняю: {shown}")
     return parts

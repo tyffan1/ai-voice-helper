@@ -9,7 +9,7 @@ from assistant.config import MAX_RECORD_SEC, SAMPLE_RATE, SILENCE_MS, VOLUME_THR
 
 def beep(freq=880.0, duration=0.12):
     t = np.linspace(0.0, duration, int(SAMPLE_RATE * duration), endpoint=False)
-    tone = (np.sin(2.0 * np.pi * freq * t) * 0.2).astype(np.float32)
+    tone = (np.sin(2.0 * np.pi * freq * t) * 0.4).astype(np.float32)
     sd.play(tone, SAMPLE_RATE)
 
 

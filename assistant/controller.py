@@ -11,18 +11,38 @@ from assistant.i18n import L
 _MEM_NAME_RE = re.compile(
     r"^(?:называй|зови|зовут)\s+меня\s+(.+)$"
     r"|^меня\s+зовут\s+(.+)$"
-    r"|^запомни(?:,)?\s+что\s+меня\s+зовут\s+(.+)$"
+    r"|^запомни(?!\w)(?:,)?\s+что\s+меня\s+зовут\s+(.+)$"
     r"|^(?:my name is|call me|you can call me)\s+(.+)$",
     re.IGNORECASE,
 )
 _MEM_CITY_RE = re.compile(
     r"^(?:я\s+живу\s+в\s+|живу\s+в\s+|мой\s+город\s+"
-    r"|запомни(?:,)?\s+мой\s+город\s+"
-    r"|запомни(?:,)?\s+что\s+(?:мой\s+город|я\s+живу\s+в)\s+"
+    r"|запомни(?!\w)(?:,)?\s+мой\s+город\s+"
+    r"|запомни(?!\w)(?:,)?\s+что\s+(?:мой\s+город|я\s+живу\s+в)\s+"
     r"|i live in\s+)(.+)$",
     re.IGNORECASE,
 )
-_MEM_FACT_RE = re.compile(r"^(?:запомни(?:,)?(?:\s+что)?|remember(?: that)?)\s+(.+)$", re.IGNORECASE)
+_MEM_FACT_RE = re.compile(
+    r"^(?:запомни(?!\w)(?:,)?(?:\s+что)?|запомню(?!\w)(?:,)?(?:\s+что)?|remember(?!\w)(?: that)?)\s+(.+)$",
+    re.IGNORECASE,
+)
+_MEM_RULE_RE = re.compile(
+    r"(?:запомни(?!\w)|запомню(?!\w)|remember(?!\w))(?:\s+что|\s+чтоб|\s+чтобы|\s+если|\s+that)?\s+"
+    r"(?:когда\s+)?"
+    r"(?:я\s+(?:тебя\s+|вас\s+)?(?:прошу|попрошу|говорю|скажу)(?:\s+тебя|\s+вас)?"
+    r"|ты\s+меня\s+просишь|прошу\s+тебя|тебя\s+прошу"
+    r"|when\s+i\s+(?:ask\s+you|tell\s+you)\s+(?:to)?|when\s+i\s+say)"
+    r"\s+(.+?)\s+"
+    r"(?:ты\s+должен|ты\s+должна|ты\s+будешь|ты\s+делаешь|ты\s+запускаешь|ты\s+открываешь"
+    r"|и\s+должен|и\s+должна|делай|надо|нужно|просто\s+запусти|просто\s+открой"
+    r"|you\s+should|you\s+will|you\s+must|please\s+do|do\s+please)"
+    r"\s+(.+)$",
+    re.IGNORECASE,
+)
+_MEM_ALIAS_RE = re.compile(
+    r"^(?:запомни(?!\w)(?:,)?\s+что\s+|запомню(?!\w)(?:,)?\s+что\s+|remember that\s+)?(.+?)\s+(?:это|это\s+значит|means)\s+(.+)$",
+    re.IGNORECASE,
+)
 _MEM_FORGET_RE = re.compile(r"^(?:забудь(?:,)?(?:\s+про)?|forget(?: about)?)\s+(.+)$", re.IGNORECASE)
 _MEM_RECALL_RE = re.compile(
     r"^(?:что\s+ты\s+(?:знаешь|помнишь)(?:\s+обо\s+мне)?"
@@ -37,6 +57,25 @@ _LAUNCH_RE = re.compile(
     re.IGNORECASE,
 )
 _LAUNCH_STOP = {"игру", "игра", "игрушку", "игры", "game", "games", "приложение", "программу", "программу"}
+
+_TIME_SET_RE = re.compile(
+    r"^(?:поставь|установи|поменяй|смени|измени|переведи|исправь|выставь|переставь)\s+"
+    r"(?:время|часы)\s+(?:на\s+компьютере\s+)?(?:на|до)?\s*(.+?)\s*$"
+    r"|^set\s+(?:the\s+)?(?:time|clock)\s+(?:to|at)?\s*(.+?)\s*$"
+    r"|^change\s+(?:the\s+)?(?:time|clock)\s+(?:to|at)?\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+_DATE_SET_RE = re.compile(
+    r"^(?:поставь|установи|поменяй|смени)\s+дату\s+(?:на\s+)?(.+?)\s*$"
+    r"|^set\s+(?:the\s+)?date\s+(?:to\s+)?(.+?)\s*$",
+    re.IGNORECASE,
+)
+_TIMER_SET_RE = re.compile(
+    r"^(?:поставь|установи|запусти|включи|создай|сделай)\s+таймер\s+(?:на\s+)?(.+?)\s*$"
+    r"|^таймер\s+(?:на\s+)?(.+?)\s*$"
+    r"|^set\s+(?:a\s+)?timer\s+for\s+(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 _CLOSE_RE = re.compile(
     r"^(закрой|закройте|закрыть|закрывай|заверши|закройка|close|quit)\s+(.+)$",
@@ -124,6 +163,23 @@ def _extract_name(text):
     return " ".join(w.capitalize() for w in t.split()[:2])[:40]
 
 
+def _parse_duration(value):
+    s = (value or "").strip().lower()
+    m = re.search(r"(\d+)\s*(?:час(?:ов|а)?|ч)\s*(?:(\d+)\s*мин)?", s)
+    if m:
+        return int(m.group(1)) * 60 + (int(m.group(2)) if m.group(2) else 0)
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            return int(parts[0]) * 60 + int(parts[1])
+        except ValueError:
+            return None
+    nums = re.findall(r"\d+", s)
+    if nums:
+        return int(nums[0])
+    return None
+
+
 def strip_wake(text, name=None):
     import re
 
@@ -135,6 +191,25 @@ def strip_wake(text, name=None):
     return None
 
 
+_RULE_FUTURE = {
+    "запустить": "запущу", "открыть": "открою", "включить": "включу",
+    "выключить": "выключу", "закрыть": "закрою", "найти": "найду",
+    "показать": "покажу", "скачать": "скачаю", "установить": "установлю",
+    "перевести": "переведу", "написать": "напишу", "поставить": "поставлю",
+    "приготовить": "приготовлю", "купить": "куплю", "посмотреть": "посмотрю",
+}
+
+
+def _rule_reply(trigger, action, name):
+    first = action.split()[0].lower() if action else ""
+    if first in _RULE_FUTURE:
+        action = _RULE_FUTURE[first] + action[len(first):]
+    return L(
+        f"Запомнила правило{', ' + name if name else ''}: когда скажешь «{trigger}» — {action}",
+        f"Got it{', ' + name if name else ''}: when you say \"{trigger}\", I will {action}",
+    )
+
+
 class Controller:
     def __init__(self, emit_status=None, emit_log=None):
         self.emit_status = emit_status or (lambda text, color=None: None)
@@ -143,7 +218,6 @@ class Controller:
         self.wake_enabled = True
         self.wake_awaiting = False
         self._wake_seen_at = 0.0
-        self._beep_at = 0.0
         self.on_exit = None
 
     @property
@@ -268,6 +342,31 @@ class Controller:
                 "Пока ничего о тебе не знаю. Скажи, например: меня зовут Макс",
                 "I don't know anything about you yet. Say, for example: my name is Max",
             )
+        m = _MEM_RULE_RE.match(text)
+        if m:
+            trigger, action = m.group(1).strip().strip('"'), m.group(2).strip().strip('"')
+            if memory.add_command(trigger, action):
+                return _rule_reply(trigger, action, memory.get_name())
+        m = _MEM_ALIAS_RE.match(text)
+        if m:
+            trigger, target = m.group(1).strip().strip('"'), m.group(2).strip().strip('"')
+            tw = len(memory._norm_words(trigger))
+            if (
+                tw <= 2
+                and target
+                and not re.search(r"\b(я|ты|мне|меня|мой|моя|мое|люблю|хочу|нравится|это)\b", trigger.lower())
+            ):
+                action = target
+                if not re.search(
+                    r"\b(запусти|запускать|открой|открыть|включи|включить|open|launch|start)\b", target.lower()
+                ):
+                    action = L(f"запусти {target}", f"launch {target}")
+                if memory.add_command(trigger, action):
+                    name = memory.get_name()
+                    return L(
+                        f"Запомнила правило{', ' + name if name else ''}: «{trigger}» — буду {action}",
+                        f"Got it{', ' + name if name else ''}: \"{trigger}\" means {action}",
+                    )
         m = _MEM_FACT_RE.match(text)
         if m:
             fact = m.group(1).strip().strip('"')
@@ -279,10 +378,13 @@ class Controller:
             kw = m.group(1).strip().strip('"')
             if memory.forget_fact(kw):
                 return L(f"Забыла про {kw}", f"Forgot about {kw}")
+            kw_cmd = re.sub(r"^(команду|команды|правило|правила)\s+", "", kw)
+            if memory.forget_command(kw_cmd):
+                return L(f"Забыла команду: {kw_cmd}", f"Forgot the command: {kw_cmd}")
             return L(f"Не помню ничего про {kw}", f"I don't remember anything about {kw}")
         return None
 
-    def handle_text(self, text):
+    def handle_text(self, text, _from_rule=False):
         text = text.strip()
         if not text or len(text) < 3:
             self._speak(_repeat())
@@ -302,6 +404,40 @@ class Controller:
             if memory_msg:
                 self.emit_log(f"{atom} {memory_msg}")
                 self._speak(memory_msg)
+                return
+            if not _from_rule:
+                rule = memory.find_command(text)
+                if rule:
+                    self.emit_log(
+                        f"{atom} {L('Правило из памяти:', 'Rule from memory:')} «{rule['trigger']}»"
+                    )
+                    self.handle_text(rule["action"], _from_rule=True)
+                    return
+            m = _TIME_SET_RE.match(text)
+            if m:
+                msg = actions.system_setting("time", next(g for g in m.groups() if g))
+                self.emit_log(f"{atom} {msg}")
+                self._speak(msg)
+                return
+            m = _DATE_SET_RE.match(text)
+            if m:
+                msg = actions.system_setting("date", next(g for g in m.groups() if g))
+                self.emit_log(f"{atom} {msg}")
+                self._speak(msg)
+                return
+            m = _TIMER_SET_RE.match(text)
+            if m:
+                val = next(g for g in m.groups() if g)
+                minutes = _parse_duration(val)
+                if minutes is None:
+                    msg = L(
+                        "Скажите, на сколько поставить таймер, например: таймер на 10 минут",
+                        "Say how long the timer should be, e.g.: timer for 10 minutes",
+                    )
+                else:
+                    msg = actions.set_timer(minutes, L("Таймер сработал!", "Timer done!"))
+                self.emit_log(f"{atom} {msg}")
+                self._speak(msg)
                 return
             if _SEARCH_DIRECT_RE.match(text) and not _LAUNCH_RE.match(text):
                 self.emit_status(_thinking(), "#ff9800")
@@ -384,7 +520,7 @@ class Controller:
             print(f"[{source}] recording...")
             recording = audio.record_until_silence()
             rms = float((recording.astype(np.float32) ** 2).mean() ** 0.5)
-            if rms < 8.0:
+            if rms < 5.0:
                 self.emit_status(_idle(), "#9e9e9e")
                 self._speak(_repeat())
                 return
@@ -395,11 +531,8 @@ class Controller:
 
     def wake_session(self, clip):
         with self.busy:
-            if time.time() - self._beep_at < 0.6:
-                print("[wake] ignoring beep echo")
-                return
             rms = float((clip.astype(np.float32) ** 2).mean() ** 0.5)
-            if rms < 8.0:
+            if rms < 5.0:
                 print("[wake] ignoring noise clip")
                 return
             wav = audio.temp_wav(clip)
@@ -418,6 +551,12 @@ class Controller:
                 _log(f"wake match ({self.wake_name}): rest={rest!r}")
             except Exception:
                 pass
+            if rest:
+                wake_low = self.wake_name.lower()
+                words = rest.split()
+                while words and words[0].lower().strip(".,!?") == wake_low:
+                    words = words[1:]
+                rest = " ".join(words)
             if self.wake_awaiting:
                 self.wake_awaiting = False
                 command = rest if rest is not None else text.strip()
@@ -432,8 +571,6 @@ class Controller:
             if rest:
                 self.handle_text(rest)
             else:
-                self._beep_at = time.time()
-                audio.beep(660.0, 0.08)
                 self.wake_awaiting = True
                 self._wake_seen_at = time.time()
                 print("[wake] waiting for command...")
@@ -474,7 +611,7 @@ class Controller:
             self._speak(question)
             recording = audio.record_until_silence(max_sec=8)
             rms = float((recording.astype(np.float32) ** 2).mean() ** 0.5)
-            if rms < 8.0:
+            if rms < 5.0:
                 continue
             wav = audio.temp_wav(recording)
             text = stt.transcribe(wav, hint="меня зовут, зови меня, как тебя зовут, моё имя, my name is")
