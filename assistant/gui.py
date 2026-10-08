@@ -1,6 +1,8 @@
 ﻿import queue
+import re
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import customtkinter as ctk
@@ -16,6 +18,19 @@ GRAY = "#9e9e9e"
 ORANGE = "#ff9800"
 BLUE = "#2196f3"
 RED = "#f44336"
+
+
+def _pretty_hotkey():
+    parts = [p for p in HOTKEY.replace("<", "").replace(">", "").split("+") if p.strip()]
+    return " + ".join(p.strip().capitalize() for p in parts)
+
+
+_USER_RE = re.compile(r"^(Вы|You):\s*(.*)$")
+_ATOM_RE = re.compile(r"^(Атом|Atom):\s*(.*)$")
+_ACTION_RE = re.compile(r"^(Действие|Action):\s*(\w+)\s*(\{.*\})?\s*(\(шаг \d+\))?\s*$")
+_APP_FAIL_RE = re.compile(r"Не наш[её]л (?:приложение|игру) (.+?)\. ")
+_ERROR_WORDS = ("не наш", "не удал", "не могу", "не смог", "не поня",
+                "ошибк", "error", "could not", "not found", "fail")
 
 
 def _icon_path():
@@ -51,8 +66,8 @@ class App(ctk.CTk):
             self.iconbitmap(default=str(_icon_path()))
         except Exception:
             pass
-        self.geometry("460x640")
-        self.minsize(400, 560)
+        self.geometry("540x700")
+        self.minsize(460, 600)
         self.controller = controller
         self._queue = queue.Queue()
         self._tray = None
@@ -128,18 +143,61 @@ class App(ctk.CTk):
         settings_tab = self.tabs.tab(L("Настройки", "Settings"))
 
         main_tab.grid_columnconfigure(0, weight=1)
-        main_tab.grid_rowconfigure(1, weight=1)
+        main_tab.grid_rowconfigure(2, weight=1)
         self.talk_button = ctk.CTkButton(
             main_tab,
             text=L("Говорить", "Talk"),
-            height=52,
-            font=ctk.CTkFont(size=18, weight="bold"),
+            height=48,
+            font=ctk.CTkFont(size=17, weight="bold"),
             command=self._on_talk,
         )
-        self.talk_button.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
+        self.talk_button.grid(row=0, column=0, padx=16, pady=(16, 4), sticky="ew")
+        self._talk_color = self.talk_button.cget("fg_color")
+
+        self.log_toolbar = ctk.CTkFrame(main_tab, fg_color="transparent", height=28)
+        self.log_toolbar.grid(row=1, column=0, padx=16, pady=(0, 2), sticky="ew")
+        self.log_toolbar.grid_columnconfigure(0, weight=1)
+        self.clear_button = ctk.CTkButton(
+            self.log_toolbar, text="🗑", width=36, height=26,
+            font=ctk.CTkFont(size=14), fg_color="transparent",
+            command=self._clear_log,
+        )
+        self.clear_button.grid(row=0, column=1, padx=(4, 0))
+        self.copy_button = ctk.CTkButton(
+            self.log_toolbar, text="📋", width=36, height=26,
+            font=ctk.CTkFont(size=14), fg_color="transparent",
+            command=self._copy_log,
+        )
+        self.copy_button.grid(row=0, column=2)
 
         self.log_box = ctk.CTkTextbox(main_tab, corner_radius=12, state="disabled", wrap="word")
-        self.log_box.grid(row=1, column=0, padx=16, pady=8, sticky="nsew")
+        self.log_box.grid(row=2, column=0, padx=16, pady=4, sticky="nsew")
+        self._config_tags()
+        self._hint_shown = False
+        self._show_hint()
+
+        self.input_frame = ctk.CTkFrame(main_tab, fg_color="transparent")
+        self.input_frame.grid(row=3, column=0, padx=16, pady=(0, 16), sticky="ew")
+        self.input_frame.grid_columnconfigure(0, weight=1)
+        self.text_entry = ctk.CTkEntry(
+            self.input_frame,
+            placeholder_text=L("Напишите команду...", "Type a command..."),
+            height=40,
+            font=ctk.CTkFont(size=14),
+        )
+        self.text_entry.grid(row=0, column=0, padx=(0, 8), sticky="ew")
+        self.text_entry.bind("<Return>", lambda _e: self._on_send())
+        self.text_entry.bind("<KeyRelease>", lambda _e: self._update_send_state())
+        self.send_button = ctk.CTkButton(
+            self.input_frame,
+            text="➤",
+            width=48,
+            height=40,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            command=self._on_send,
+        )
+        self.send_button.grid(row=0, column=1, sticky="e")
+        self.send_button.configure(state="disabled")
 
         self.wake_switch = ctk.CTkSwitch(
             settings_tab, text=self._wake_switch_text(), command=self._toggle_wake
@@ -182,12 +240,18 @@ class App(ctk.CTk):
             self.autostart_switch.select()
         else:
             self.autostart_switch.deselect()
+        try:
+            self.talk_button.configure(state="normal", text=L("Говорить", "Talk"),
+                                       fg_color=self._talk_color)
+            self.send_button.configure(state="disabled")
+        except Exception:
+            pass
 
     def _wake_switch_text(self):
         return L(f"Откликаться на «{self.controller.wake_name}»", f'Respond to "{self.controller.wake_name}"')
 
     def _hint_text(self):
-        return L(f"Горячая клавиша: {HOTKEY}", f"Hotkey: {HOTKEY}")
+        return L(f"Горячая клавиша: {_pretty_hotkey()}", f"Hotkey: {_pretty_hotkey()}")
 
     def _on_language(self, choice):
         lang = "ru" if choice == "Русский" else "en"
@@ -203,10 +267,16 @@ class App(ctk.CTk):
         self.tabs.grid(row=1, column=0, padx=16, pady=8, sticky="nsew")
         self._build_tabs()
         self._restore_tab_states()
-        if log_text:
-            self.log_box.configure(state="normal")
-            self.log_box.insert("1.0", log_text)
-            self.log_box.configure(state="disabled")
+        if log_text and log_text.strip():
+            try:
+                tb = self.log_box._textbox
+                tb.configure(state="normal")
+                tb.delete("1.0", "end")
+                tb.insert("1.0", log_text)
+                tb.configure(state="disabled")
+                self._hint_shown = False
+            except Exception:
+                pass
         self._rebuild_tray()
 
     def _toggle_wake(self):
@@ -217,6 +287,30 @@ class App(ctk.CTk):
 
     def _on_talk(self):
         threading.Thread(target=self.controller.record_and_handle, args=("кнопка",), daemon=True).start()
+
+    def _on_send(self):
+        try:
+            text = self.text_entry.get().strip()
+        except Exception:
+            return
+        if not text:
+            return
+        try:
+            self.text_entry.delete(0, "end")
+            self.text_entry.focus()
+        except Exception:
+            pass
+        self._update_send_state()
+        threading.Thread(
+            target=self.controller.handle_text, args=(text,), kwargs={"voice": False}, daemon=True
+        ).start()
+
+    def _update_send_state(self):
+        try:
+            has = bool(self.text_entry.get().strip())
+            self.send_button.configure(state="normal" if has else "disabled")
+        except Exception:
+            pass
 
     def _on_close(self):
         self._hide_to_tray()
@@ -245,6 +339,146 @@ class App(ctk.CTk):
                 pass
         self.destroy()
 
+    def _config_tags(self):
+        try:
+            t = self.log_box._textbox
+            t.tag_config("time", foreground="#666666", font=ctk.CTkFont(size=11))
+            t.tag_config("user", foreground="#7fb6ff", spacing1=8,
+                         font=ctk.CTkFont(size=13, weight="bold"))
+            t.tag_config("atom", foreground="#e6e6e6", spacing1=8,
+                         font=ctk.CTkFont(size=13))
+            t.tag_config("action", foreground="#7a7a7a",
+                         font=("Consolas", 10))
+            t.tag_config("error", foreground="#ff7b7b",
+                         font=ctk.CTkFont(size=13))
+            t.tag_config("hint", foreground="#555555",
+                         font=ctk.CTkFont(size=12, slant="italic"))
+        except Exception:
+            pass
+
+    def _show_hint(self):
+        try:
+            tb = self.log_box._textbox
+            hint = L('Попробуйте: «открой Chrome», «какая погода?», «нажми кнопку Сохранить»',
+                     'Try: "open Chrome", "what\'s the weather?", "click the Save button"')
+            tb.configure(state="normal")
+            tb.insert("end", hint + "\n", "hint")
+            tb.configure(state="disabled")
+            self._hint_shown = True
+        except Exception:
+            pass
+
+    def _clear_log(self):
+        try:
+            tb = self.log_box._textbox
+            tb.configure(state="normal")
+            tb.delete("1.0", "end")
+            tb.configure(state="disabled")
+            self._show_hint()
+        except Exception:
+            pass
+
+    def _copy_log(self):
+        try:
+            text = self.log_box.get("1.0", "end-1c")
+            self.clipboard_clear()
+            self.clipboard_append(text)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _short_action(tool, params):
+        vals = re.findall(r"""['"]([^'"]{1,40})['"]""", params or "")
+        values = vals[1::2] or vals[:1]  # только значения, без ключей
+        return " ".join(values[:2])
+
+    def _append_log(self, text):
+        try:
+            tb = self.log_box._textbox
+            tb.configure(state="normal")
+            if getattr(self, "_hint_shown", False):
+                tb.delete("1.0", "end")
+                self._hint_shown = False
+            ts = datetime.now().strftime("%H:%M")
+            tag = "atom"
+            for line in (text or "").split("\n"):
+                if not line.strip():
+                    continue
+                m = _USER_RE.match(line)
+                if m:
+                    tag = "user"
+                    tb.insert("end", f"{ts} ", "time")
+                    tb.insert("end", f"{m.group(1)}  ", tag)
+                    tb.insert("end", m.group(2) + "\n", tag)
+                    continue
+                m = _ACTION_RE.match(line)
+                if m:
+                    tag = "action"
+                    tool, params, step = m.group(2), m.group(3) or "", m.group(4) or ""
+                    short = self._short_action(tool, params)
+                    collapsed = f"⚙ {tool} {short} {step}".strip()
+                    tb.insert("end", collapsed + "\n", tag)
+                    continue
+                m = _ATOM_RE.match(line)
+                if m:
+                    body = m.group(2)
+                    low = body.lower()
+                    tag = "error" if any(w in low for w in _ERROR_WORDS) else "atom"
+                    tb.insert("end", f"{ts} ", "time")
+                    tb.insert("end", f"{m.group(1)}  ", tag)
+                    tb.insert("end", body + "\n", tag)
+                    if tag == "error":
+                        self._maybe_suggest(tb, body)
+                    continue
+                tb.insert("end", line + "\n", tag)
+            tb.configure(state="disabled")
+            tb.see("end")
+        except Exception:
+            pass
+
+    def _maybe_suggest(self, tb, body):
+        m = _APP_FAIL_RE.search(body or "")
+        if not m:
+            return
+        try:
+            cands = actions.suggest_apps(m.group(1).strip())
+        except Exception:
+            cands = []
+        if not cands:
+            return
+        try:
+            tb.insert("end", L("Возможно, вы имели в виду: ", "Did you mean: "), "hint")
+            for cand in cands:
+                btn = ctk.CTkButton(tb, text=cand, height=24,
+                                    font=ctk.CTkFont(size=12),
+                                    command=lambda c=cand: self._on_suggest(c))
+                tb.window_create("end", window=btn)
+                tb.insert("end", " ", "hint")
+            tb.insert("end", "\n", "hint")
+        except Exception:
+            pass
+
+    def _on_suggest(self, cand):
+        cmd = L(f"открой {cand}", f"open {cand}")
+        threading.Thread(
+            target=self.controller.handle_text, args=(cmd,), kwargs={"voice": False}, daemon=True
+        ).start()
+
+    def _update_talk_state(self, status):
+        try:
+            t = status or ""
+            rec = "Записываю" in t or "Recording" in t
+            busy = rec or any(k in t for k in ("Думаю", "Thinking", "Говорю", "Speaking"))
+            if rec:
+                self.talk_button.configure(state="disabled", text="■ Стоп", fg_color=RED)
+            elif busy:
+                self.talk_button.configure(state="disabled", text=L("Подождите...", "Wait..."))
+            else:
+                self.talk_button.configure(state="normal", text=L("Говорить", "Talk"),
+                                           fg_color=self._talk_color)
+        except Exception:
+            pass
+
     def emit_status(self, text, color=None):
         self._queue.put(("status", text, color or GRAY))
 
@@ -258,11 +492,9 @@ class App(ctk.CTk):
                 if kind == "status":
                     self.status_label.configure(text=rest[0])
                     self.status_dot.configure(text_color=rest[1])
+                    self._update_talk_state(rest[0])
                 elif kind == "log":
-                    self.log_box.configure(state="normal")
-                    self.log_box.insert("end", rest[0] + "\n")
-                    self.log_box.see("end")
-                    self.log_box.configure(state="disabled")
+                    self._append_log(rest[0])
         except queue.Empty:
             pass
         self.after(100, self._poll)

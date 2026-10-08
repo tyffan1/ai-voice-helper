@@ -45,3 +45,13 @@ SAMPLE_RATE = 16000
 SILENCE_MS = 1200
 VOLUME_THRESHOLD = 300
 MAX_RECORD_SEC = 30
+
+# Агент: максимум шагов думать->делать за один запрос
+AGENT_MAX_STEPS = int(os.environ.get("ASSISTANT_AGENT_STEPS", "4"))
+
+# Облачная модель (опционально, гибридный режим). Без ключа — полностью офлайн.
+CLOUD_API_KEY = os.environ.get("ASSISTANT_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+CLOUD_API_BASE = os.environ.get(
+    "ASSISTANT_API_BASE", os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+)
+CLOUD_MODEL = os.environ.get("ASSISTANT_API_MODEL", "gpt-4o-mini")

@@ -130,7 +130,7 @@ python -m PyInstaller --noconfirm --onefile --windowed --name AtomAssistant `
   --collect-all llama_cpp --collect-all faster_whisper --collect-all ctranslate2 `
   --collect-all tokenizers --collect-all onnxruntime --collect-all av `
   --collect-all customtkinter --collect-all piper --collect-all sounddevice `
-  --collect-all pystray --collect-all PIL `
+  --collect-all pystray --collect-all PIL --collect-all pywinauto `
   run_app.py
 ```
 

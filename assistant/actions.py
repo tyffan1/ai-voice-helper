@@ -69,6 +69,7 @@ def _rank(stem, name_l):
 
 _APP_ALIASES = {
     "фокс": "firefox", "фоера": "firefox", "фаерфокс": "firefox", "файерфокс": "firefox", "огнелис": "firefox",
+    "фаер": "firefox", "файер": "firefox", "фаер фокс": "firefox", "файер фокс": "firefox",
     "мозила": "firefox", "мозилла": "firefox", "fox": "firefox",
     "телжку": "telegram", "тенге": "telegram", "тележка": "telegram", "телега": "telegram",
     "телеграмм": "telegram", "телеграм": "telegram", "тг": "telegram",
@@ -88,6 +89,8 @@ _APP_ALIASES = {
     "проводник": "explorer", "эксплорер": "explorer", "файловый менеджер": "explorer",
     "броузер": "browser", "браузер": "browser",
     "вк": "vk", "вконтакте": "vk", "в контакте": "vk",
+    "терминал": "cmd", "консоль": "cmd", "командная строка": "cmd", "cmd": "cmd",
+    "terminal": "cmd", "console": "cmd", "пауэршелл": "powershell", "повершелл": "powershell",
     "ютуб": "youtube", "ютубе": "youtube", "ютьюб": "youtube",
     "гугл хром": "chrome", "вижуал студио": "code", "визуал студио": "code", "вижуал студио код": "code",
     "фотошоп": "photoshop", "фотошопе": "photoshop",
@@ -98,6 +101,9 @@ def _resolve_name(name):
     n = (name or "").strip().strip('"').lower()
     if n in _APP_ALIASES:
         return _APP_ALIASES[n]
+    nospace = n.replace(" ", "")
+    if nospace in _APP_ALIASES:
+        return _APP_ALIASES[nospace]
     words = n.split()
     return " ".join(_APP_ALIASES.get(w, w) for w in words) or n
 
@@ -105,9 +111,11 @@ def _resolve_name(name):
 def _search_lnk(name, allow_url=False):
     name_l = name.lower()
     best = None
+    stems = {}  # stem -> path, для difflib-фолбэка
     for base in _iter_lnk_dirs():
         for lnk in base.rglob("*.lnk"):
             stem = lnk.stem.lower()
+            stems.setdefault(stem, str(lnk))
             if name_l not in stem and name_l not in _to_ru(stem):
                 continue
             target = _lnk_target(lnk).lower()
@@ -115,7 +123,41 @@ def _search_lnk(name, allow_url=False):
                 continue
             if best is None or _rank(stem, name_l) > _rank(best[1], name_l):
                 best = (str(lnk), stem)
+    if best is None and stems:
+        import difflib
+
+        for cand in difflib.get_close_matches(name_l, list(stems), n=3, cutoff=0.55):
+            target = _lnk_target(stems[cand]).lower()
+            if not allow_url and target.startswith(("http://", "https://", "steam:", "minecraft:")):
+                continue
+            return stems[cand]
     return best[0] if best else None
+
+
+def suggest_apps(name, limit=3):
+    """Похожие названия приложений для кнопок-вариантов в GUI."""
+    import difflib
+
+    q = _resolve_name(name)
+    cands = {}
+    for base in _iter_lnk_dirs():
+        try:
+            for lnk in base.rglob("*.lnk"):
+                cands.setdefault(lnk.stem, lnk.stem)
+        except Exception:
+            pass
+    try:
+        for n, _appid in _uwp_apps():
+            cands.setdefault(n, n)
+    except Exception:
+        pass
+    out = [c for c in cands if q.lower() in c.lower()][:limit]
+    if len(out) < limit:
+        low = {c.lower(): c for c in cands}
+        for m in difflib.get_close_matches(q.lower(), list(low), n=limit, cutoff=0.5):
+            if low[m] not in out:
+                out.append(low[m])
+    return out[:limit]
 
 
 def _find_exe(name):
@@ -217,7 +259,7 @@ def _fuzzy_hit(query, candidate):
     return False
 
 
-def _search_steam(name):
+def _search_steam(name, query=None):
     name_l = _translit(name)
     name_r = name.lower()
     try:
@@ -240,7 +282,14 @@ def _search_steam(name):
                     if not (m and mid):
                         continue
                     nm = m.group(1).strip()
-                    if _fuzzy_hit(name_l, nm.lower()) or _fuzzy_hit(name_r, _to_ru(nm)):
+                    hit = False
+                    if query is not None:
+                        q = query.lower()
+                        nm_l = nm.lower()
+                        hit = q in nm_l or nm_l in q
+                    else:
+                        hit = _fuzzy_hit(name_l, nm.lower()) or _fuzzy_hit(name_r, _to_ru(nm))
+                    if hit:
                         if best is None or _rank(nm.lower(), name_l) > _rank(best[1], name_l):
                             best = (mid.group(1), nm)
                 except Exception:
@@ -1580,8 +1629,6 @@ def app_hint():
 
 _WEB_APPS = {
     "youtube": "https://www.youtube.com",
-    "vk": "https://vk.com",
-    "вконтакте": "https://vk.com",
     "instagram": "https://www.instagram.com",
     "tiktok": "https://www.tiktok.com",
     "twitter": "https://x.com",
@@ -1638,11 +1685,11 @@ def open_app(name):
     )
 
 
-def open_game(name):
+def open_game(name, query=None):
     name = _resolve_name(name)
     if not name:
         return L("Назовите игру", "Name the game")
-    hit = _search_steam(name)
+    hit = _search_steam(name, query)
     if hit:
         appid, nm = hit
         os.startfile(f"steam://rungameid/{appid}")
@@ -1995,6 +2042,43 @@ REGISTRY = {
     "shutdown": (shutdown, "выключить компьютер (только по явной просьбе с подтверждением), params: confirm"),
     "cancel_shutdown": (cancel_shutdown, "отменить выключение компьютера, params: нет"),
     "exit_assistant": (exit_assistant, "завершить работу ассистента, params: нет"),
+    # --- агент: computer-use ---
+    "screen_info": (__import__("assistant.computer", fromlist=["screen_info"]).screen_info,
+                    "узнать размер экрана и активное окно"),
+    "mouse_move": (__import__("assistant.computer", fromlist=["mouse_move"]).mouse_move,
+                   "переместить курсор, params: x, y"),
+    "mouse_click": (__import__("assistant.computer", fromlist=["mouse_click"]).mouse_click,
+                    "клик в точке экрана, params: x, y, button"),
+    "double_click": (__import__("assistant.computer", fromlist=["double_click"]).double_click,
+                     "двойной клик, params: x, y"),
+    "right_click": (__import__("assistant.computer", fromlist=["right_click"]).right_click,
+                    "правый клик, params: x, y"),
+    "mouse_drag": (__import__("assistant.computer", fromlist=["mouse_drag"]).mouse_drag,
+                   "перетаскивание, params: x1, y1, x2, y2"),
+    "list_windows": (__import__("assistant.computer", fromlist=["list_windows"]).list_windows,
+                     "список открытых окон"),
+    "focus_window": (__import__("assistant.computer", fromlist=["focus_window"]).focus_window,
+                     "активировать окно, params: title"),
+    "active_window": (__import__("assistant.computer", fromlist=["active_window"]).active_window,
+                      "активное окно"),
+    # --- агент: файлы и код ---
+    "list_dir": (__import__("assistant.files", fromlist=["list_dir"]).list_dir,
+                 "содержимое папки, params: path"),
+    "read_file": (__import__("assistant.files", fromlist=["read_file"]).read_file,
+                  "прочитать файл, params: path"),
+    "write_file": (__import__("assistant.files", fromlist=["write_file"]).write_file,
+                   "записать в файл, params: path, content, mode"),
+    "delete_file": (__import__("assistant.files", fromlist=["delete_file"]).delete_file,
+                    "удалить файл/папку (с confirm), params: path, confirm"),
+    "run_shell": (__import__("assistant.files", fromlist=["run_shell"]).run_shell,
+                  "выполнить команду shell (с confirm), params: command, confirm"),
+    "run_python": (__import__("assistant.files", fromlist=["run_python"]).run_python,
+                   "выполнить Python-код (с confirm), params: code, confirm"),
+    # --- агент: зрение ---
+    "describe_screen": (__import__("assistant.vision", fromlist=["describe_screen"]).describe_screen,
+                        "описать, что сейчас на экране"),
+    "click_element": (__import__("assistant.vision", fromlist=["click_element"]).click_element,
+                      "кликнуть по элементу с таким текстом (кнопка, закладка, вкладка), params: name"),
 }
 
 

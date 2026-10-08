@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 
-from assistant import audio, actions, i18n, llm, memory, stt, tts
+from assistant import audio, actions, agent, i18n, llm, memory, safety, stt, tts
 from assistant.i18n import L
 
 _MEM_NAME_RE = re.compile(
@@ -219,6 +219,8 @@ class Controller:
         self.wake_awaiting = False
         self._wake_seen_at = 0.0
         self.on_exit = None
+        self._pending = None  # {"tool":..., "params":...} ждёт «да»
+        self._voice = True  # False = текстовый режим, без озвучки
 
     @property
     def wake_name(self):
@@ -231,6 +233,10 @@ class Controller:
 
     def _speak(self, text):
         if not text:
+            return
+        if not getattr(self, "_voice", True):
+            # текстовый режим: только лог, без озвучки
+            self.emit_status(_idle(), "#9e9e9e")
             return
         self.emit_status(_speaking(), "#4caf50")
         tts.speak(text)
@@ -384,7 +390,8 @@ class Controller:
             return L(f"Не помню ничего про {kw}", f"I don't remember anything about {kw}")
         return None
 
-    def handle_text(self, text, _from_rule=False):
+    def handle_text(self, text, _from_rule=False, voice=True):
+        self._voice = voice
         text = text.strip()
         if not text or len(text) < 3:
             self._speak(_repeat())
@@ -393,6 +400,37 @@ class Controller:
             you = L("Вы:", "You:")
             atom = L("Атом:", "Atom:")
             self.emit_log(f"{you} {text}")
+            # --- подтверждение опасного действия из прошлого шага ---
+            if self._pending:
+                if safety.is_confirm(text):
+                    tool = self._pending["tool"]
+                    params = dict(self._pending["params"] or {})
+                    params["confirm"] = True
+                    rest = list(self._pending.get("rest") or [])
+                    self._pending = None
+                    self.emit_status(_thinking(), "#ff9800")
+                    if tool == "exit_assistant":
+                        goodbye = L("До встречи", "See you")
+                        self.emit_log(f"{atom} {goodbye}")
+                        self._speak(goodbye)
+                        if self.on_exit:
+                            self.on_exit()
+                        return
+                    result = actions.execute(tool, params)
+                    self.emit_log(f"{atom} {result}")
+                    self._speak(result if result else _idle())
+                    if rest:
+                        # цепочка продолжается с оставшихся шагов
+                        self.handle_text(" потом ".join(rest), _from_rule=True, voice=voice)
+                    return
+                # любой другой текст — отмена ожидания
+                if len(text.split()) <= 4:
+                    self._pending = None
+                    msg = L("Отменил опасное действие", "Dangerous action cancelled")
+                    self.emit_log(f"{atom} {msg}")
+                    self._speak(msg)
+                    return
+                self._pending = None  # новая команда перекрывает ожидание
             if re.search(r"\b(ip|айпи)\b", text.lower()):
                 ip = actions._my_ip()
                 if ip:
@@ -411,7 +449,7 @@ class Controller:
                     self.emit_log(
                         f"{atom} {L('Правило из памяти:', 'Rule from memory:')} «{rule['trigger']}»"
                     )
-                    self.handle_text(rule["action"], _from_rule=True)
+                    self.handle_text(rule["action"], _from_rule=True, voice=voice)
                     return
             m = _TIME_SET_RE.match(text)
             if m:
@@ -451,68 +489,85 @@ class Controller:
                 self._speak(msg)
                 return
             self.emit_status(_thinking(), "#ff9800")
-            decision = llm.ask(text)
-            if "reply" in decision:
-                if self._fallback_launch_close(text, atom):
+            # Агентный цикл: несколько шагов вместо одного вызова
+            try:
+                final_text, pending = agent.run(
+                    text, lang=i18n.get_language(), emit_log=self.emit_log
+                )
+            except Exception as exc:
+                # fallback на старый одиночный вызов
+                try:
+                    decision = llm.ask(text)
+                except Exception:
+                    decision = {"reply": L(f"Ошибка: {exc}", f"Error: {exc}")}
+                if "reply" in decision:
+                    if self._fallback_launch_close(text, atom):
+                        return
+                    self.emit_log(f"{atom} {decision['reply']}")
+                    self._speak(decision["reply"])
                     return
-                if _FACT_RE.match(text) or _SEARCH_RE.match(text):
+                final_text, pending = None, None
+                tool = decision.get("tool")
+                params = decision.get("params") or {}
+                if tool not in actions.REGISTRY:
+                    if self._fallback_launch_close(text, atom):
+                        return
+                    self._speak(L("Не понял команду", "Did not understand"))
+                    return
+                if tool == "exit_assistant":
+                    goodbye = L("До встречи", "See you")
+                    self.emit_log(f"{atom} {goodbye}")
+                    self._speak(goodbye)
+                    if self.on_exit:
+                        self.on_exit()
+                    return
+                final_text = actions.execute(tool, params)
+            if pending:
+                self._pending = pending
+                self.emit_log(f"{atom} {final_text}")
+                self._speak(final_text)
+                return
+            if not final_text:
+                self.emit_status(_idle(), "#9e9e9e")
+                return
+            # web-поиск: подытожить через LLM как раньше
+            if isinstance(final_text, str) and final_text.startswith("1. ") and "\n" in final_text:
+                try:
+                    summary = _clean_summary(llm.summarize(final_text, text, lang=i18n.get_language()))
+                    if summary and not any(h in summary.lower() for h in _NOT_FOUND_HINTS):
+                        self.emit_log(f"{atom} {summary}")
+                        self._speak(summary)
+                        return
+                except Exception:
+                    pass
+            # выход из ассистента мог прийти из агента
+            if "До встречи" in str(final_text) or "See you" in str(final_text):
+                last_tool = ""
+                try:
+                    # эвристика: если просили выйти — выходим
+                    if any(w in text.lower() for w in ("выйди", "закройся", "exit assistant", "quit")):
+                        self.emit_log(f"{atom} {final_text}")
+                        self._speak(final_text)
+                        if self.on_exit:
+                            self.on_exit()
+                        return
+                except Exception:
+                    pass
+            if self._fallback_launch_close(text, atom):
+                # агент не справился, а прямой запуск по имени сработал — уже ответили
+                # но если final_text полезный, тоже показать
+                if final_text and "Не нашёл" not in str(final_text) and "Could not" not in str(final_text):
+                    pass
+                return
+            if _FACT_RE.match(text) or _SEARCH_RE.match(text):
+                if len(str(final_text)) < 40 and "не " in str(final_text).lower():
                     summary = self._verify_fact(text)
                     if summary:
                         self.emit_log(f"{atom} {summary}")
                         self._speak(summary)
                         return
-                self.emit_log(f"{atom} {decision['reply']}")
-                self._speak(decision["reply"])
-                return
-            tool = decision.get("tool")
-            params = decision.get("params") or {}
-            if tool not in actions.REGISTRY:
-                if self._fallback_launch_close(text, atom):
-                    return
-                self.emit_log(f"{atom} {tool}")
-                self._speak(
-                    L("Не понял команду, попробуйте сформулировать иначе", "Did not understand, try rephrasing")
-                )
-                return
-            self.emit_log(L("Действие:", "Action:") + f" {tool} {params}")
-            if tool == "exit_assistant":
-                goodbye = L("До встречи", "See you")
-                self.emit_log(f"{atom} {goodbye}")
-                self._speak(goodbye)
-                self.emit_status(L("Завершение...", "Shutting down..."), "#f44336")
-                if self.on_exit:
-                    self.on_exit()
-                else:
-                    import os
-
-                    os._exit(0)
-            result = actions.execute(tool, params)
-            if result:
-                if tool in ("web_query", "web_search"):
-                    try:
-                        summary = None
-                        results = actions._search(text)
-                        if results:
-                            snips = "\n".join(
-                                f"{i}. {title}. {snip}"
-                                for i, (title, href, snip) in enumerate(results[:5], 1)
-                                if snip
-                            )
-                            if snips.strip():
-                                summary = llm.summarize(snips, text, lang=i18n.get_language())
-                        if not summary or any(h in summary.lower() for h in _NOT_FOUND_HINTS):
-                            summary = llm.summarize(result, text, lang=i18n.get_language())
-                    except Exception:
-                        summary = None
-                    summary = _clean_summary(summary) if summary else None
-                    if summary:
-                        self.emit_log(f"{atom} {summary}")
-                        self._speak(summary)
-                        return
-                self.emit_log(f"{atom} {result}")
-                self._speak(result)
-            else:
-                self.emit_status(_idle(), "#9e9e9e")
+            self.emit_log(f"{atom} {final_text}")
+            self._speak(str(final_text))
 
     def record_and_handle(self, source=L("горячая клавиша", "hotkey")):
         with self.busy:

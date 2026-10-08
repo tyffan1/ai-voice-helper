@@ -12,3 +12,4 @@ comtypes
 pycaw
 edge-tts
 miniaudio
+pywinauto
